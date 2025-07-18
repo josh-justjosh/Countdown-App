@@ -104,27 +104,3 @@ class AudioManager:
                 self.engine.stop()
             self._initialized = False
             logging.info("Audio manager shut down.")
-
-# Example usage (for testing, won't be run directly in Flask app)
-if __name__ == "__main__":
-    audio_mgr = AudioManager()
-
-    print("Adding some messages to the queue...")
-    audio_mgr.speak("Ten seconds!", 10)
-    audio_mgr.speak("One minute remaining.", 60)
-    audio_mgr.speak("Five seconds!", 5)
-    audio_mgr.speak("Thirty seconds left.", 30)
-    audio_mgr.speak("Two minutes to go.", 120)
-
-    # Let some time pass for messages to be spoken
-    time.sleep(15)
-
-    print("Adding more messages, some with higher priority now...")
-    audio_mgr.speak("Critical! One second!", 1)
-    audio_mgr.speak("Almost there, three seconds!", 3)
-    audio_mgr.speak("New event in 20 seconds!", 20)
-
-    time.sleep(10)
-
-    print("Done. Shutting down.")
-    audio_mgr.shutdown()

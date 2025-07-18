@@ -1,19 +1,136 @@
-# vt_api_manager.py
+# vt_api_manager.py (UPDATED)
 import requests
 import xml.etree.ElementTree as ET
-from pythonosc import udp_client, osc_message_builder
+from pythonosc import udp_client, osc_message_builder, osc_server
+from pythonosc.dispatcher import Dispatcher
 import threading
 import time
 import logging
+from collections import defaultdict
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+class OSCServerManager:
+    """
+    Manages an OSC server to listen for QLab replies and updates.
+    Stores the latest QLab state in a thread-safe manner.
+    """
+    def __init__(self, listen_ip: str, listen_port: int):
+        self.listen_ip = listen_ip
+        self.listen_port = listen_port
+        self.dispatcher = Dispatcher()
+        self.server = None
+        self._stop_event = threading.Event()
+        self._qlab_state = defaultdict(dict) # {cue_id: {property: value, ...}}
+        self._state_lock = threading.Lock()
+        self.server_thread = None
+
+        # Map QLab reply addresses to handlers
+        self.dispatcher.map("/reply/*", self._handle_qlab_reply)
+        # QLab can also send /update messages if configured, though replies are more direct for queries.
+        # For /update/workspace/{workspace_id}/cue_id/{cue_id}
+        self.dispatcher.map("/update/workspace/*/cue_id/*", self._handle_qlab_update_cue_id)
+        # For /update/workspace/{workspace_id}/cueList/{cue_list_id}/playbackPosition {cue_id}
+        self.dispatcher.map("/update/workspace/*/cueList/*/playbackPosition", self._handle_qlab_update_playback_position)
+
+        logging.info(f"OSC Server Manager initialized to listen on {listen_ip}:{listen_port}")
+
+    def _handle_qlab_reply(self, address, *args):
+        """
+        Handler for QLab OSC replies to queries.
+        Address format: /reply/{original_query_address}
+        e.g., /reply/cue/active/uid, /reply/cue/{uid}/duration
+        """
+        logging.debug(f"OSC Reply received: {address}, Args: {args}")
+        parts = address.split('/')
+        
+        # Example: /reply/cue/active/uid -> parts[3] = 'cue', parts[4] = 'active', parts[5] = 'uid'
+        # Example: /reply/cue/{uid}/duration -> parts[3] = 'cue', parts[4] = '{uid}', parts[5] = 'duration'
+
+        if len(parts) >= 6 and parts[1] == 'reply' and parts[2] == 'cue':
+            if parts[4] == 'active' and parts[5] == 'uid':
+                # This is a reply to /cue/active/uid?
+                with self._state_lock:
+                    # QLab's /cue/active/uid? replies with a list of currently active UIDs.
+                    # We should update the 'active' status for these UIDs.
+                    # It's safer to mark all previously active as inactive first, then update.
+                    for uid in list(self._qlab_state.keys()): # Iterate over a copy
+                        if self._qlab_state[uid].get('active'):
+                            self._qlab_state[uid]['active'] = False # Mark as inactive unless found again
+                    
+                    for uid in args:
+                        self._qlab_state[uid]['active'] = True
+                        self._qlab_state[uid]['last_updated'] = time.time()
+                logging.debug(f"QLab active UIDs updated: {args}")
+            elif len(parts) == 6: # e.g., /reply/cue/{uid}/duration
+                cue_id = parts[4]
+                prop_name = parts[5]
+                if args:
+                    with self._state_lock:
+                        self._qlab_state[cue_id][prop_name] = args[0]
+                        self._qlab_state[cue_id]['last_updated'] = time.time()
+                    logging.debug(f"QLab cue {cue_id} property {prop_name} updated to {args[0]}")
+        else:
+            logging.debug(f"Unhandled QLab reply address: {address}")
+
+    def _handle_qlab_update_cue_id(self, address, workspace_id, cue_id):
+        """Handler for /update/workspace/{workspace_id}/cue_id/{cue_id} messages."""
+        logging.debug(f"OSC Update Cue ID received: {address}, Workspace: {workspace_id}, Cue ID: {cue_id}")
+        # This update means the state of this specific cue has changed.
+        # We might need to re-query its properties if it's relevant.
+        # For now, we'll just log it. The polling mechanism will re-query.
+
+    def _handle_qlab_update_playback_position(self, address, workspace_id, cue_list_id, playback_cue_id=None):
+        """Handler for /update/workspace/{workspace_id}/cueList/{cue_list_id}/playbackPosition {cue_id}."""
+        logging.debug(f"OSC Playback Position Update received: {address}, Playback Cue ID: {playback_cue_id}")
+        with self._state_lock:
+            # Mark all cues as not playhead
+            for uid in list(self._qlab_state.keys()):
+                if self._qlab_state[uid].get('is_playhead'):
+                    self._qlab_state[uid]['is_playhead'] = False
+
+            if playback_cue_id:
+                self._qlab_state[playback_cue_id]['is_playhead'] = True
+                self._qlab_state[playback_cue_id]['last_updated'] = time.time()
+        logging.debug(f"QLab playback position updated to: {playback_cue_id}")
+
+
+    def start(self):
+        """Starts the OSC server in a daemon thread."""
+        try:
+            self.server = osc_server.ThreadingOSCUDPServer(
+                (self.listen_ip, self.listen_port), self.dispatcher
+            )
+            self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+            self.server_thread.start()
+            logging.info(f"OSC Server started on {self.listen_ip}:{self.listen_port}")
+        except Exception as e:
+            logging.error(f"Failed to start OSC server: {e}")
+            self.server = None
+
+    def stop(self):
+        """Shuts down the OSC server."""
+        if self.server:
+            logging.info("Shutting down OSC server...")
+            self.server.shutdown()
+            self.server.server_close()
+            if self.server_thread and self.server_thread.is_alive():
+                self.server_thread.join(timeout=1)
+            logging.info("OSC Server shut down.")
+
+    def get_qlab_state(self):
+        """Returns a thread-safe copy of the current QLab state."""
+        with self._state_lock:
+            return dict(self._qlab_state) # Return a copy to prevent external modification issues
+
+
 class QLabAPIClient:
-    """Handles communication with QLab via OSC."""
-    def __init__(self, ip: str, port: int):
+    """Handles sending OSC messages to QLab and reading state from OSCServerManager."""
+    def __init__(self, ip: str, port: int, osc_server_manager: OSCServerManager):
         self.ip = ip
         self.port = port
         self.client = None
+        self.osc_server_manager = osc_server_manager # Reference to the shared OSC server
         try:
             self.client = udp_client.SimpleUDPClient(self.ip, self.port)
             logging.info(f"QLab OSC client initialized for {ip}:{port}")
@@ -22,117 +139,90 @@ class QLabAPIClient:
             self.client = None
 
     def _send_osc_query(self, address, *args):
-        """Helper to send an OSC query and attempt to get a response (though UDP is fire-and-forget)."""
+        """Helper to send an OSC query to QLab."""
         if not self.client:
-            return None
-
-        # QLab typically replies to the port it received the message on + 1, or 53001
-        # For querying, QLab expects specific query messages.
-        # This is basic; a full OSC server for replies would be more robust.
-        # For now, we'll send a query and hope for the best (or assume push updates if QLab supports them for this)
-        # QLab's OSC API for querying properties is usually /cue/{id}/property?
+            logging.warning(f"QLab client not initialized. Cannot send OSC query to {address}.")
+            return False
         try:
             msg = osc_message_builder.OscMessageBuilder(address=address)
             for arg in args:
                 msg.add_arg(arg)
             self.client.send(msg.build())
-            return True # Indicates message sent, not necessarily a successful reply
+            logging.debug(f"Sent OSC query to QLab: {address} {args}")
+            return True
         except Exception as e:
             logging.warning(f"Failed to send OSC query to QLab ({address}): {e}")
             return False
 
-    def get_cue_property(self, cue_id: str, prop: str):
+    def get_active_video_remaining_time(self) -> tuple[float | None, str | None]:
         """
-        Sends an OSC query to get a specific property of a cue.
-        QLab usually replies to port 53001 if the client listens there.
-        This client is simplified and doesn't listen for replies.
-        A more robust solution would involve an OSC server within Python.
-        For simplified use, QLab users often send queries and poll.
+        Queries QLab for active video cues and calculates remaining time.
+        This relies on the OSCServerManager receiving replies from QLab.
         """
-        if not self.client:
-            return None
-        # QLab uses /cue/{id}/{property} for queries.
-        # It sends back /reply/{address} args to port 53001
-        # Since we're not running an OSC server, this is a best-effort.
-        # Real-time QLab integration for countdowns often involves custom OSC feedback from QLab
-        # to a dedicated OSC receiver.
-        # For simplicity, we'll try to use /cue/active and poll properties.
+        if not self.client or not self.osc_server_manager:
+            return None, None
 
-        # The QLab documentation suggests querying /cue/{id}/duration? and /cue/{id}/actionElapsed?
-        # to calculate remaining time.
-        # The challenge is getting {id} of the *active video* cue automatically.
-        # QLab has /cue/active which addresses all currently playing cues.
-        # Querying /cue/active/type would return a list of types.
-        # This requires an OSC *server* to receive the replies.
+        # 1. Request active cue UIDs from QLab
+        # This will trigger /reply/cue/active/uid to the OSCServerManager
+        self._send_osc_query("/cue/active/uid", "?")
+        # Also request playhead position to prioritize
+        self._send_osc_query("/cue/playbackPosition", "?")
+        
+        # Give QLab a moment to reply and the OSC server to process
+        time.sleep(0.05) 
 
-        # Given the "polling frequency should be 500ms" constraint,
-        # it's implied we'd actively poll.
-        # Without a full OSC server here, the most direct polling approach is limited.
-        # I'll make a strong assumption here based on typical QLab usage:
-        # A specific 'video' cue is expected to be playing and its ID will be known
-        # or discoverable via a separate manual step.
-        # For automated "active cue" detection without an OSC server to receive async replies:
-        # One common approach is to send `/query/allCues` and parse replies, or use `/cue/active/uid`
-        # and then query properties for those UIDs. This gets complex without a proper OSC server.
+        qlab_state = self.osc_server_manager.get_qlab_state()
+        
+        # Prioritize playhead if it's a video cue
+        playhead_uid = None
+        for uid, data in qlab_state.items():
+            if data.get('is_playhead'):
+                playhead_uid = uid
+                break
 
-        # For the scope of this script, let's assume a "primary video cue" concept or
-        # a more direct way to determine the active video cue by querying `/cue/playhead` or similar.
-        # The user said "OSC should be able to work with the active cue".
-        # The most reliable way to get *a* currently playing cue and its progress
-        # without complex reply parsing and state management (which belongs in a dedicated QLab API wrapper)
-        # is often to query the playhead of the main cue list or a known cue list.
-        # /cueList/{id}/playbackPosition returns the UID of the playhead.
-        # Then, we can query that UID.
+        target_uids = []
+        if playhead_uid:
+            target_uids.append(playhead_uid)
+        
+        # Add other active UIDs if not already the playhead
+        active_uids = [uid for uid, data in qlab_state.items() if data.get('active') and uid not in target_uids]
+        target_uids.extend(active_uids)
 
-        logging.debug(f"Attempting to query QLab for cue {cue_id}'s {prop}")
-        msg = osc_message_builder.OscMessageBuilder(address=f"/cue/{cue_id}/{prop}")
-        msg.add_arg('?') # QLab query syntax
-        self.client.send(msg.build())
-        # We can't synchronously get the reply here with SimpleUDPClient.
-        # A more robust QLab integration requires a dedicated OSC server thread in this app.
-        # For now, I will create a placeholder for a more advanced QLab logic
-        # and might have to simplify to a "known QLab cue ID" input for the user
-        # if dynamic "active video cue" discovery proves too complex without full OSC server.
+        if not target_uids:
+            logging.debug("QLab: No active or playhead cues reported.")
+            return None, None
 
-        return None # Cannot get immediate reply
+        # 2. For each relevant UID, query its type, duration, and elapsed time
+        for uid in target_uids:
+            self._send_osc_query(f"/cue/{uid}/type", "?")
+            self._send_osc_query(f"/cue/{uid}/duration", "?")
+            self._send_osc_query(f"/cue/{uid}/actionElapsed", "?")
+            self._send_osc_query(f"/cue/{uid}/name", "?") # Also get name
+            time.sleep(0.02) # Small delay for replies for each query
 
-    def get_active_video_remaining_time(self, main_cue_list_id: str = "1", video_cue_type: str = "Video") -> tuple[float | None, str | None]:
-        """
-        Attempts to get the remaining time of the active video cue in QLab.
-        This is a highly simplified implementation due to the limitations of SimpleUDPClient
-        and the complexity of dynamic QLab state parsing without an OSC server.
-        A more robust solution would involve:
-        1. Running an `osc_server.ThreadingOSCUDPServer` to listen for QLab replies.
-        2. QLab sending `/update` messages or specific replies to queries.
-        3. Maintaining a state of active cues based on these updates.
+        # 3. Re-read state and find a suitable video cue
+        qlab_state = self.osc_server_manager.get_qlab_state()
+        
+        for uid in target_uids:
+            cue_data = qlab_state.get(uid, {})
+            cue_type = cue_data.get('type')
+            duration = cue_data.get('duration')
+            elapsed = cue_data.get('actionElapsed')
+            cue_name = cue_data.get('name', f"QLab Cue {uid[:8]}...")
+            
+            # Check if it's a video cue and has valid duration/elapsed time
+            # QLab video cue types are typically "Video"
+            if cue_type == "Video" and isinstance(duration, (int, float)) and isinstance(elapsed, (int, float)):
+                if duration > 0:
+                    remaining_s = duration - elapsed
+                    logging.debug(f"QLab found active video cue: {cue_name}, Remaining: {remaining_s:.2f}s")
+                    return max(0.0, remaining_s), cue_name
+                else:
+                    logging.debug(f"QLab cue {uid} is 'Video' type but has zero or invalid duration.")
 
-        For this current scope, this function will assume a specific cue can be identified
-        (e.g., by ID from a UI input) and then its properties are queried.
-        The most "active" QLab cue is often the playhead.
-        If we query `/cueList/{id}/playbackPosition` to get a UID,
-        then `/cue/{uid}/type`, `/cue/{uid}/duration`, `/cue/{uid}/actionElapsed`.
-        However, `python-osc`'s `udp_client.SimpleUDPClient` is fire-and-forget for sends.
-        To *receive* replies, we need a `osc_server`.
+        logging.debug("QLab: No active video cue with valid duration/elapsed found among active/playhead cues.")
+        return None, None
 
-        Given the constraint, I will implement a placeholder for QLab, and recommend
-        that for true "active cue" tracking, a separate OSC server is needed within the Python app
-        to receive QLab's asynchronous responses (e.g., to `/cue/active` queries or `/update` messages).
-
-        For now, this will return None, None, until a full OSC server is integrated
-        or a specific, known cue ID is provided for polling.
-        A more practical approach for live use (without a full OSC server) is to have the QLab operator
-        manually input the QLab Cue ID they want to track into the UI.
-        Let's assume for *now* that the user will provide a QLab Cue ID in the UI if they want to track QLab.
-        """
-        logging.warning("QLab 'active video' detection requires a full OSC server to receive replies. "
-                        "This method is a placeholder. Please provide a known cue_id if you want to track QLab.")
-        # If the user provides a 'tracked_cue_id' for QLab in the UI:
-        # cue_id = "your_user_provided_cue_id"
-        # self._send_osc_query(f"/cue/{cue_id}/duration?")
-        # self._send_osc_query(f"/cue/{cue_id}/actionElapsed?")
-        # ... and then an OSC server would receive these replies.
-        # Without that, we can't automatically get the data.
-        return None, None # Cannot get dynamic remaining time without listening for OSC replies
 
 class VmixAPIClient:
     """Handles communication with vMix via HTTP XML API."""
@@ -187,8 +277,8 @@ class VmixAPIClient:
             # Check if it's a video-like input type
             # Common video types in vMix XML: "Video", "VideoList", "GT", "NDI", "DeckLink"
             # We focus on types that have a clear duration/position
-            if input_type not in ["Video", "VideoList", "GT", "Stream", "Replay", "DeckLink", "ImageSequence"]:
-                 logging.debug(f"vMix: Input '{input_identifier}' (type: {input_type}) is not a recognized video type.")
+            if input_type not in ["Video", "VideoList", "GT", "Stream", "Replay", "DeckLink", "ImageSequence", "VideoDelay"]:
+                 logging.debug(f"vMix: Input '{input_identifier}' (type: {input_type}) is not a recognized video type with duration.")
                  return None, None
 
             duration_ms = int(target_input.get("duration", "0"))
@@ -215,22 +305,23 @@ class VmixAPIClient:
         """
         Finds the video input currently in the Program output and returns its remaining time.
         """
-        program_input_id = None
+        program_input_number = None
+        # Iterate through mixes to find the main program mix (number="1")
         for mix_elem in xml_root.findall(".//mix"):
             if mix_elem.get("number") == "1": # Main mix (program)
+                # Find the active input within this mix
                 for input_elem in mix_elem.findall("./input"):
                     if input_elem.get("active") == "true": # This input is active on program
-                        program_input_id = input_elem.get("key") # Get its unique ID
+                        program_input_number = input_elem.get("number") # Get its number
                         break
-            if program_input_id:
+            if program_input_number:
                 break
 
-        if not program_input_id:
+        if not program_input_number:
             logging.debug("vMix: No active input found in Program output.")
             return None, None
 
-        # Now find the full input details using its key
-        for input_elem in xml_root.findall(".//input"):
-            if input_elem.get("key") == program_input_id:
-                return self.get_video_input_status(xml_root, input_elem.get("number")) # Use number for consistency
-        return None, None
+        # Now get the full status for this input using its number
+        # We need to iterate through all inputs again to find the one matching the program_input_number
+        # as the mix element only gives a subset of input attributes.
+        return self.get_video_input_status(xml_root, program_input_number)

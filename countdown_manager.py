@@ -1,6 +1,7 @@
 # countdown_manager.py (UPDATED)
 from countdown import Countdown
 from audio_manager import AudioManager
+from vt_api_manager import OSCServerManager # Import OSCServerManager
 import threading
 import logging
 from datetime import datetime
@@ -10,10 +11,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 class CountdownManager:
     """Manages creation, tracking, and stopping of multiple countdown instances."""
 
-    def __init__(self, socketio):
+    def __init__(self, socketio, osc_server_manager: OSCServerManager):
         self.active_countdowns = {}  # {countdown_id: Countdown_instance}
         self.socketio = socketio
         self.audio_manager = AudioManager() # Get the singleton instance
+        self.osc_server_manager = osc_server_manager # Store reference to OSCServerManager
         self._next_id = 1
         self._lock = threading.Lock() # For thread-safe access to active_countdowns
 
@@ -60,7 +62,7 @@ class CountdownManager:
     def start_vt_countdown(self, name: str, vt_api_config: dict, verbalization_config: dict) -> dict:
         """
         Starts a countdown for a video (VT) by polling QLab/vMix APIs.
-        vt_api_config: dict containing 'qlab_ip', 'qlab_port', 'vmix_ip', 'vmix_port',
+        vt_api_config: dict containing 'qlab_ip', 'qlab_send_port', 'vmix_ip', 'vmix_port',
                                       'vmix_fallback1_input', 'vmix_fallback2_input'.
         """
         # Basic validation for API config
@@ -75,7 +77,8 @@ class CountdownManager:
             target_config=vt_api_config, # Pass API configuration dict
             verbalization_settings=verbalization_config,
             audio_manager=self.audio_manager,
-            socketio=self.socketio
+            socketio=self.socketio,
+            osc_server_manager=self.osc_server_manager # Pass the OSC server manager
         )
         with self._lock:
             self.active_countdowns[countdown_id] = countdown
@@ -112,7 +115,7 @@ class CountdownManager:
                     remaining_seconds = 0 # Fallback
 
                 data.append({
-                    'id': countdown.id,
+                    'id': c_id, # Use c_id directly from the dict key
                     'name': countdown.name,
                     'type': countdown.type,
                     'remaining_seconds': max(0, remaining_seconds),

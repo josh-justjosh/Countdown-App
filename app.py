@@ -2,20 +2,31 @@
 from flask import Flask, render_template
 from flask_socketio import SocketIO, emit
 from countdown_manager import CountdownManager
-from audio_manager import AudioManager # To ensure it's initialized on app start
+from audio_manager import AudioManager
+from vt_api_manager import OSCServerManager # Import the new OSC server manager
 import logging
 import os
+import threading
+import time
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = Flask(__name__, static_folder='static', template_folder='static')
-app.config['SECRET_KEY'] = 'your_secret_key_here' # Change this to a strong, random key
+app.config['SECRET_KEY'] = 'your_secret_key_here' # IMPORTANT: Change this to a strong, random key
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Initialize AudioManager and CountdownManager
+# --- Global Managers ---
 # AudioManager is a singleton, so calling it here ensures it starts its thread.
 audio_manager = AudioManager()
-countdown_manager = CountdownManager(socketio)
+
+# Initialize OSCServerManager (for QLab replies)
+# QLab typically replies on port 53001 if it receives on 53000.
+# We'll make the listen port configurable via UI, but default to 53001 for replies.
+# The actual QLab sending port (53000) will be passed to QLabAPIClient.
+osc_server_manager = OSCServerManager(listen_ip="0.0.0.0", listen_port=53001) # Listen for QLab replies
+osc_server_manager.start() # Start the OSC server thread
+
+countdown_manager = CountdownManager(socketio, osc_server_manager) # Pass the OSC server manager
 
 @app.route('/')
 def index():
@@ -79,9 +90,11 @@ def shutdown_server():
     """Shuts down the Flask server and cleans up countdowns/audio."""
     logging.info("Shutting down Flask server and managers...")
     countdown_manager.shutdown()
-    # In a production setup, you might need a more robust way to terminate Flask/Gevent
-    # For development, Ctrl+C usually works, or you can send a signal.
-    os._exit(0) # Force exit to ensure all threads are terminated
+    osc_server_manager.stop() # Stop the OSC server
+    logging.info("All managers shut down. Exiting.")
+    # For a clean exit in a multi-threaded Flask-SocketIO app, os._exit(0) is often needed
+    # especially if threads are not daemonized or don't exit cleanly on their own.
+    os._exit(0)
 
 if __name__ == '__main__':
     logging.info("Starting Flask-SocketIO server...")
@@ -89,4 +102,4 @@ if __name__ == '__main__':
     import atexit
     atexit.register(shutdown_server)
 
-    socketio.run(app, host='0.0.0.0', port=6000, debug=False) # Set debug=True for development
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False, allow_unsafe_werkzeug=True)

@@ -22,10 +22,22 @@ document.addEventListener('DOMContentLoaded', (event) => {
                                          if (val === 300) return '5m';
                                          if (val === 180) return '3m';
                                          if (val === 120) return '2m';
-                                         return `${val}s`; // For seconds
-                                     });
+                                         // For single seconds, ensure we map them correctly
+                                         if (val === 90) return '90s';
+                                         if (val === 60) return '60s';
+                                         if (val === 45) return '45s';
+                                         if (val === 30) return '30s';
+                                         if (val === 20) return '20s';
+                                         if (val === 15) return '15s';
+                                         // If single seconds are explicitly chosen by checkbox (not part of 5/10s countdown)
+                                         if (val >=1 && val <= 10) return `${val}s`;
+                                         return null; // Should not happen if values are controlled
+                                     }).filter(Boolean); // Remove any nulls if mapping failed
+
         const countdownFrom = form.querySelector('.countdown-from-select').value;
-        const verbalize10sOn5s = form.querySelector('input[name="verbalize-10s-on-5s"], input[name="vt-verbalize-10s-on-5s"]').checked;
+        const verbalize10sOn5sCheckbox = form.querySelector('input[name="verbalize-10s-on-5s"], input[name="vt-verbalize-10s-on-5s"]');
+        const verbalize10sOn5s = verbalize10sOn5sCheckbox ? verbalize10sOn5sCheckbox.checked : false; // Check if element exists
+
         const formatString = form.querySelector(`#${formId.replace('-form', '')}-format-string`).value;
 
         return {
@@ -84,7 +96,7 @@ document.addEventListener('DOMContentLoaded', (event) => {
         const vmixFallback1 = document.getElementById('vmix-fallback1').value;
         const vmixFallback2 = document.getElementById('vmix-fallback2').value;
         const qlabIp = document.getElementById('qlab-ip').value;
-        const qlabPort = parseInt(document.getElementById('qlab-port').value, 10);
+        const qlabSendPort = parseInt(document.getElementById('qlab-send-port').value, 10);
         // const qlabCueId = document.getElementById('qlab-cue-id').value; // If implemented
 
         const verbalizationConfig = getVerbalizationConfig('vt-countdown-form');
@@ -95,7 +107,7 @@ document.addEventListener('DOMContentLoaded', (event) => {
             vmix_fallback1_input: vmixFallback1 || null,
             vmix_fallback2_input: vmixFallback2 || null,
             qlab_ip: qlabIp || null,
-            qlab_port: qlabPort || null,
+            qlab_send_port: qlabSendPort || null,
             // qlab_tracked_cue_id: qlabCueId || null // If implemented
         };
 

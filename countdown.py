@@ -1,11 +1,11 @@
-# countdown.py (UPDATED)
+# countdown.py
 import threading
 import time
 from datetime import datetime, timedelta
 import logging
 
 # Import the new API manager
-from vt_api_manager import QLabAPIClient, VmixAPIClient
+from vt_api_manager import QLabAPIClient, VmixAPIClient, OSCServerManager
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -26,7 +26,7 @@ class Countdown(threading.Thread):
     POLLING_INTERVAL_SECONDS = 0.5 # 500ms
 
     def __init__(self, countdown_id, countdown_type, name, target_config, # Renamed for flexibility
-                 verbalization_settings, audio_manager, socketio):
+                 verbalization_settings, audio_manager, socketio, osc_server_manager: OSCServerManager = None):
         super().__init__()
         self.id = countdown_id
         self.type = countdown_type # 'item' or 'vt'
@@ -41,6 +41,7 @@ class Countdown(threading.Thread):
         self.last_known_remaining_seconds = None # For 'vt' type
         self.vt_api_clients = {} # Stores QLab and vMix client instances
         self.vt_api_config = target_config # Stores API details for 'vt' type
+        self.osc_server_manager = osc_server_manager # Reference to the global OSC server
 
         if self.type == 'item':
             # target_config is a datetime object
@@ -48,8 +49,13 @@ class Countdown(threading.Thread):
             logging.info(f"Countdown '{self.name}' (ID: {self.id}) initialized for item at {self.target_datetime}")
         elif self.type == 'vt':
             # target_config is a dictionary with API details
-            if self.vt_api_config.get('qlab_ip') and self.vt_api_config.get('qlab_port'):
-                self.vt_api_clients['qlab'] = QLabAPIClient(self.vt_api_config['qlab_ip'], self.vt_api_config['qlab_port'])
+            if self.vt_api_config.get('qlab_ip') and self.vt_api_config.get('qlab_send_port') and self.osc_server_manager:
+                # Pass the OSC server manager to QLabAPIClient so it can read state
+                self.vt_api_clients['qlab'] = QLabAPIClient(
+                    self.vt_api_config['qlab_ip'],
+                    self.vt_api_config['qlab_send_port'],
+                    self.osc_server_manager
+                )
             if self.vt_api_config.get('vmix_ip') and self.vt_api_config.get('vmix_port'):
                 self.vt_api_clients['vmix'] = VmixAPIClient(self.vt_api_config['vmix_ip'], self.vt_api_config['vmix_port'])
             
@@ -81,7 +87,7 @@ class Countdown(threading.Thread):
                 if remaining_seconds is not None:
                     self.last_known_remaining_seconds = remaining_seconds
                 else:
-                    # If API fails, use last known or default to zero to indicate non-running/finished
+                    # If API fails or no video found, use last known or default to zero
                     remaining_seconds = self.last_known_remaining_seconds if self.last_known_remaining_seconds is not None else 0
                     if remaining_seconds <= 0: # Ensure it doesn't show negative if API drops
                         remaining_seconds = 0
@@ -135,25 +141,16 @@ class Countdown(threading.Thread):
                             return remaining_s, title
 
         # 3. Check QLab (if QLab client is available)
-        # QLab integration is complex without a full OSC server.
-        # For this version, it's a placeholder. If you input a specific QLab cue ID,
-        # you'd need to extend QLabAPIClient to poll for its duration/elapsed.
-        # The current QLabAPIClient.get_active_video_remaining_time is a stub.
         if 'qlab' in self.vt_api_clients:
             qlab_client: QLabAPIClient = self.vt_api_clients['qlab']
-            # This part needs a specific cue ID from the UI or more complex logic
-            # to dynamically find the "active video cue" from QLab responses
-            # which usually require a full OSC server to listen for replies.
-            # Example: qlab_cue_id_to_track = self.vt_api_config.get('qlab_tracked_cue_id')
-            # if qlab_cue_id_to_track:
-            #     remaining_s, title = qlab_client.get_cue_remaining_time(qlab_cue_id_to_track)
-            #     if remaining_s is not None:
-            #         logging.debug(f"QLab Tracked Cue '{qlab_cue_id_to_track}': {title}, Remaining: {remaining_s:.2f}s")
-            #         return remaining_s, title
-            logging.warning("QLab API integration for 'active video' is currently a placeholder. "
-                            "It requires either a known cue ID to poll, or a dedicated OSC server "
-                            "to receive QLab's asynchronous updates. Returning None.")
-            return None, None # Placeholder: No QLab integration implemented for dynamic active cue.
+            # This method now uses the OSC server to get the latest QLab state
+            remaining_s, title = qlab_client.get_active_video_remaining_time()
+            if remaining_s is not None:
+                logging.debug(f"QLab Active Video: {title}, Remaining: {remaining_s:.2f}s")
+                return remaining_s, title
+            else:
+                logging.debug("QLab: No active video cue found or data not yet received.")
+
 
         return None, None # No active video found or API clients not configured/reachable
 
