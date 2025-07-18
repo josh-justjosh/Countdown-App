@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Countdown App</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>Audio Countdown Control</h1>
+
+        <div class="modes">
+            <div class="mode-section" id="item-countdown-section">
+                <h2>Countdown to Specific Item</h2>
+                <form id="item-countdown-form">
+                    <label for="item-name">Item Name:</label>
+                    <input type="text" id="item-name" required><br>
+
+                    <label for="target-datetime">Target Date/Time:</label>
+                    <input type="datetime-local" id="target-datetime" required><br>
+
+                    <h3>Verbalization Options:</h3>
+                    <div class="verbal-options">
+                        <label><input type="checkbox" name="interval" value="3600"> 1 Hour</label>
+                        <label><input type="checkbox" name="interval" value="2700"> 45 Minutes</label>
+                        <label><input type="checkbox" name="interval" value="1800"> 30 Minutes</label>
+                        <label><input type="checkbox" name="interval" value="1200"> 20 Minutes</label>
+                        <label><input type="checkbox" name="interval" value="900"> 15 Minutes</label>
+                        <label><input type="checkbox" name="interval" value="600"> 10 Minutes</label>
+                        <label><input type="checkbox" name="interval" value="300"> 5 Minutes</label>
+                        <label><input type="checkbox" name="interval" value="180"> 3 Minutes</label>
+                        <label><input type="checkbox" name="interval" value="120"> 2 Minutes</label>
+                        <label><input type="checkbox" name="interval" value="90"> 90 Seconds</label>
+                        <label><input type="checkbox" name="interval" value="60"> 60 Seconds</label>
+                        <label><input type="checkbox" name="interval" value="45"> 45 Seconds</label>
+                        <label><input type="checkbox" name="interval" value="30"> 30 Seconds</label>
+                        <label><input type="checkbox" name="interval" value="20"> 20 Seconds</label>
+                        <label><input type="checkbox" name="interval" value="15"> 15 Seconds</label>
+                        <br>
+                        <label>
+                            Countdown from:
+                            <select name="countdown-from-select" class="countdown-from-select">
+                                <option value="">None</option>
+                                <option value="10s">10 Seconds</option>
+                                <option value="5s">5 Seconds</option>
+                            </select>
+                        </label>
+                        <label class="verbalize-10s-option" style="display: none;">
+                            <input type="checkbox" name="verbalize-10s-on-5s"> Verbalize 10s (if 5s selected)
+                        </label>
+                    </div>
+                    <label for="item-format-string">Verbalization Format (e.g., "VT Out in {time_value} {time_unit}"):</label>
+                    <input type="text" id="item-format-string" value="{name} in {time_value} {time_unit}" required><br>
+
+                    <button type="submit">Start Item Countdown</button>
+                </form>
+            </div>
+
+            <div class="mode-section" id="vt-countdown-section">
+                <h2>Video (VT) Countdown (API Polling)</h2>
+                <form id="vt-countdown-form">
+                    <label for="vt-name">VT Name (for verbalization):</label>
+                    <input type="text" id="vt-name" value="VT" required><br>
+
+                    <h3>API Configuration:</h3>
+                    <h4>vMix Settings:</h4>
+                    <label for="vmix-ip">vMix IP Address:</label>
+                    <input type="text" id="vmix-ip" value="127.0.0.1"><br>
+                    <label for="vmix-port">vMix Port:</label>
+                    <input type="number" id="vmix-port" value="8088"><br>
+                    <label for="vmix-fallback1">vMix Fallback Input 1 (Name/Number):</label>
+                    <input type="text" id="vmix-fallback1"><br>
+                    <label for="vmix-fallback2">vMix Fallback Input 2 (Name/Number):</label>
+                    <input type="text" id="vmix-fallback2"><br>
+
+                    <h4>QLab Settings (Currently Placeholder - Requires OSC Server to listen for replies for dynamic active cue tracking):</h4>
+                    <label for="qlab-ip">QLab IP Address:</label>
+                    <input type="text" id="qlab-ip" value="127.0.0.1"><br>
+                    <label for="qlab-port">QLab OSC Port:</label>
+                    <input type="number" id="qlab-port" value="53000"><br>
+                    <p class="note">Note: QLab 'active cue' tracking requires an OSC server on the Python side to receive replies, which is not fully implemented in this version for dynamic tracking. If you need this feature, consider providing a fixed QLab cue ID and extending the Python OSC client to poll specific cue properties, or setting up a full OSC server.</p>
+
+                    <h3>Verbalization Options:</h3>
+                    <div class="verbal-options">
+                        <label><input type="checkbox" name="vt-interval" value="3600"> 1 Hour</label>
+                        <label><input type="checkbox" name="vt-interval" value="2700"> 45 Minutes</label>
+                        <label><input type="checkbox" name="vt-interval" value="1800"> 30 Minutes</label>
+                        <label><input type="checkbox" name="vt-interval" value="1200"> 20 Minutes</label>
+                        <label><input type="checkbox" name="vt-interval" value="900"> 15 Minutes</label>
+                        <label><input type="checkbox" name="vt-interval" value="600"> 10 Minutes</label>
+                        <label><input type="checkbox" name="vt-interval" value="300"> 5 Minutes</label>
+                        <label><input type="checkbox" name="vt-interval" value="180"> 3 Minutes</label>
+                        <label><input type="checkbox" name="vt-interval" value="120"> 2 Minutes</label>
+                        <label><input type="checkbox" name="vt-interval" value="90"> 90 Seconds</label>
+                        <label><input type="checkbox" name="vt-interval" value="60"> 60 Seconds</label>
+                        <label><input type="checkbox" name="vt-interval" value="45"> 45 Seconds</label>
+                        <label><input type="checkbox" name="vt-interval" value="30"> 30 Seconds</label>
+                        <label><input type="checkbox" name="vt-interval" value="20"> 20 Seconds</label>
+                        <label><input type="checkbox" name="vt-interval" value="15"> 15 Seconds</label>
+                        <br>
+                        <label>
+                            Countdown from:
+                            <select name="vt-countdown-from-select" class="countdown-from-select">
+                                <option value="">None</option>
+                                <option value="10s">10 Seconds</option>
+                                <option value="5s">5 Seconds</option>
+                            </select>
+                        </label>
+                        <label class="verbalize-10s-option" style="display: none;">
+                            <input type="checkbox" name="vt-verbalize-10s-on-5s"> Verbalize 10s (if 5s selected)
+                        </label>
+                    </div>
+                    <label for="vt-format-string">Verbalization Format (e.g., "VT Out in {time_value} {time_unit}"):</label>
+                    <input type="text" id="vt-format-string" value="{name} out in {time_value} {time_unit}" required><br>
+
+                    <button type="submit">Start VT Countdown</button>
+                </form>
+            </div>
+        </div>
+
+        <h2>Active Countdowns</h2>
+        <div id="active-countdowns">
+            <p id="no-countdowns-message">No active countdowns.</p>
+        </div>
+    </div>
+
+    <script src="[https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.min.js](https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.min.js)"></script>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
