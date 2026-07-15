@@ -798,12 +798,20 @@ def main() -> None:
 
     import uvicorn
 
+    # Windowed PyInstaller builds (esp. Windows) leave stdout/stderr as None;
+    # uvicorn's colour formatter calls isatty() and crashes without these.
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8", errors="replace")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8", errors="replace")
+
     ensure_data_dirs()
     logger.info("Starting VT Vocal Countdown on http://%s:%s", HOST, PORT)
     logger.info("Static dir: %s | Data dir: %s", STATIC_DIR, VOICES_DIR.parent)
 
     open_browser = os.environ.get("COUNTDOWN_OPEN_BROWSER", "").strip() in ("1", "true", "yes")
-    if getattr(sys, "frozen", False):
+    frozen = getattr(sys, "frozen", False)
+    if frozen:
         open_browser = True
 
     if open_browser:
@@ -814,9 +822,51 @@ def main() -> None:
 
         threading.Thread(target=_open, daemon=True).start()
 
+    # Avoid ColourizedFormatter probing a missing TTY when frozen.
+    log_config = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "default": {
+                "()": "uvicorn.logging.DefaultFormatter",
+                "fmt": "%(levelprefix)s %(message)s",
+                "use_colors": False,
+            },
+            "access": {
+                "()": "uvicorn.logging.AccessFormatter",
+                "fmt": '%(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s',
+                "use_colors": False,
+            },
+        },
+        "handlers": {
+            "default": {
+                "formatter": "default",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stderr",
+            },
+            "access": {
+                "formatter": "access",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stdout",
+            },
+        },
+        "loggers": {
+            "uvicorn": {"handlers": ["default"], "level": "INFO", "propagate": False},
+            "uvicorn.error": {"level": "INFO"},
+            "uvicorn.access": {"handlers": ["access"], "level": "INFO", "propagate": False},
+        },
+    }
+
     # String import fails under PyInstaller; pass the ASGI app object when frozen.
-    if getattr(sys, "frozen", False):
-        uvicorn.run(app, host=HOST, port=PORT, reload=False, log_level="info")
+    if frozen:
+        uvicorn.run(
+            app,
+            host=HOST,
+            port=PORT,
+            reload=False,
+            log_level="info",
+            log_config=log_config,
+        )
     else:
         uvicorn.run("backend.main:app", host=HOST, port=PORT, reload=False, factory=False)
 
