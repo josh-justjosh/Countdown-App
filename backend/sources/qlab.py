@@ -86,7 +86,6 @@ class QLabSource(MediaSource):
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._bind_ok = False
-        self._peer_connected = False
         self._catalog: list[dict] = []
         self._session_ok = False
         self._start()
@@ -99,27 +98,15 @@ class QLabSource(MediaSource):
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((self.listen_ip, self.listen_port))
-            # Connect the datagram socket to QLab so the OS (esp. Windows Firewall)
-            # associates inbound UDP replies with this outbound peer. Without this,
-            # ping can succeed while OSC replies are silently dropped.
-            try:
-                sock.connect((self.ip, self.send_port))
-                self._peer_connected = True
-            except OSError as exc:
-                logger.warning(
-                    "Could not connect UDP peer %s:%s (%s); falling back to sendto",
-                    self.ip,
-                    self.send_port,
-                    exc,
-                )
-                self._peer_connected = False
+            # Do not sock.connect() to QLab: replies often come from an ephemeral
+            # source port, and a connected UDP socket would drop them.
             sock.settimeout(0.2)
             self._sock = sock
             self._bind_ok = True
             self._thread = threading.Thread(target=self._recv_loop, daemon=True)
             self._thread.start()
             logger.info(
-                "QLab OSC socket bound on %s:%s → %s:%s",
+                "QLab OSC socket bound on %s:%s (send → %s:%s)",
                 self.listen_ip,
                 self.listen_port,
                 self.ip,
@@ -129,16 +116,12 @@ class QLabSource(MediaSource):
             logger.error("Failed to bind QLab listen port %s: %s", self.listen_port, exc)
             self._sock = None
             self._bind_ok = False
-            self._peer_connected = False
 
     def _recv_loop(self) -> None:
         assert self._sock is not None
         while not self._stop.is_set():
             try:
-                if self._peer_connected:
-                    data = self._sock.recv(65535)
-                else:
-                    data, _addr = self._sock.recvfrom(65535)
+                data, _addr = self._sock.recvfrom(65535)
             except socket.timeout:
                 continue
             except OSError:
@@ -231,12 +214,8 @@ class QLabSource(MediaSource):
         builder = OscMessageBuilder(address=address)
         for arg in args:
             builder.add_arg(arg)
-        packet = builder.build().dgram
         try:
-            if self._peer_connected:
-                self._sock.send(packet)
-            else:
-                self._sock.sendto(packet, (self.ip, self.send_port))
+            self._sock.sendto(builder.build().dgram, (self.ip, self.send_port))
         except OSError as exc:
             logger.debug("OSC send failed: %s", exc)
 
@@ -253,17 +232,18 @@ class QLabSource(MediaSource):
             return False, f"OSC listen port {self.listen_port} unavailable"
 
         # Ask QLab to remember this UDP client and always reply
-        self._send("/udpKeepAlive", 1)
         self._send("/alwaysReply", 1)
-        time.sleep(0.05)
+        self._send("/udpKeepAlive", 1)
+        time.sleep(0.08)
 
         with self._lock:
             self._json_replies.pop("workspaces", None)
             self._state["_meta"].pop("connect", None)
             self._state["_meta"].pop("last_error", None)
+            self._state["_meta"].pop("version", None)
 
         self._get("/workspaces")
-        time.sleep(0.2)
+        time.sleep(0.35)
         with self._lock:
             workspaces = self._json_replies.get("workspaces")
             err = self._state["_meta"].get("last_error")
@@ -287,25 +267,26 @@ class QLabSource(MediaSource):
                     self._send(f"/workspace/{uid}/connect", self.passcode)
                 else:
                     self._send(f"/workspace/{uid}/connect")
-                time.sleep(0.08)
+                time.sleep(0.1)
         else:
             # Frontmost / all workspaces listening on this port
             if self.passcode:
                 self._send("/connect", self.passcode)
             else:
                 self._send("/connect")
-            time.sleep(0.12)
+            time.sleep(0.2)
 
         # Confirm with a simple application read
         with self._lock:
             self._state["_meta"].pop("version", None)
             self._state["_meta"].pop("last_error", None)
         self._get("/version")
-        time.sleep(0.15)
+        time.sleep(0.35)
         with self._lock:
             version = self._state["_meta"].get("version")
             connect_reply = self._state["_meta"].get("connect")
             last_error = self._state["_meta"].get("last_error")
+            updated = float(self._state["_meta"].get("last_updated", 0) or 0)
 
         if _is_error_payload(version):
             detail = _failure_detail(version)
@@ -319,13 +300,19 @@ class QLabSource(MediaSource):
         if _is_error_payload(connect_reply):
             return False, f"QLab connect failed: {_failure_detail(connect_reply)}"
 
-        if version is None and last_error is None and not ws_list:
+        got_any = (
+            version is not None
+            or ws_list
+            or (connect_reply is not None and not _is_error_payload(connect_reply))
+            or (time.time() - updated) < 2.0
+        )
+        if not got_any and last_error is None:
             return False, (
                 f"No OSC reply from {self.ip}:{self.send_port}. "
                 "QLab uses UDP (ping is ICMP and can succeed while OSC fails). "
-                "On Windows, allow VT Vocal Countdown through Defender Firewall "
-                "for Private networks, or add an inbound rule for UDP port "
-                f"{self.listen_port} (replies) and outbound UDP {self.send_port}."
+                "Check IP/ports, that QLab OSC is enabled, and firewalls allow "
+                f"UDP {self.send_port} out and UDP {self.listen_port} in "
+                "(replies may come from an ephemeral source port)."
             )
 
         self._session_ok = True
