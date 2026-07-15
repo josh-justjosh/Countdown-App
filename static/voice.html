@@ -1,0 +1,966 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Manage voice · VT Vocal Countdown</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;650&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/assets/css/app.css" />
+  <script src="https://cdn.jsdelivr.net/npm/vue@3.5.13/dist/vue.global.prod.js"></script>
+</head>
+<body>
+  <div id="app" class="voice-shell">
+    <header class="voice-header">
+      <div>
+        <a href="/">&larr; Back to control</a>
+        <h1>Manage voice</h1>
+      </div>
+      <div class="voice-picker">
+        <label class="field" style="margin:0;min-width:160px">
+          Voice pack
+          <select v-model="selectedVoiceId" @change="onVoiceChange">
+            <option v-for="v in voices" :key="v.id" :value="v.id">{{ v.name }}</option>
+          </select>
+        </label>
+        <button class="btn" type="button" @click="createVoice">New…</button>
+        <button class="btn" type="button" :disabled="voiceLocked" @click="renameVoice">Rename</button>
+        <button class="btn ghost" type="button" :disabled="voiceLocked || voices.length <= 1" @click="deleteVoice">Delete</button>
+      </div>
+    </header>
+
+    <div class="voice-tabs">
+      <button type="button" class="btn" :class="{ primary: mode === 'library' }" @click="setMode('library')">Library</button>
+      <button type="button" class="btn" :class="{ primary: mode === 'pack' }" :disabled="voiceLocked" @click="setMode('pack')">Record pack</button>
+      <button type="button" class="btn" :class="{ primary: mode === 'rolldown' }" :disabled="voiceLocked" @click="setMode('rolldown')">10→1 take</button>
+    </div>
+
+    <p v-if="voiceLocked" class="wizard-context" style="margin:0 0 0.75rem">
+      Default voice is locked (read-only). Use <strong>New…</strong> to create an editable voice pack.
+    </p>
+    <p class="voice-status">{{ clips.recorded_count }}/{{ clips.total }} recorded in this pack · schedule-ready: {{ clips.complete ? 'yes' : 'missing clips' }}</p>
+
+    <!-- Trimmer overlay -->
+    <section v-if="trim.open" class="panel trim-panel">
+      <h2>Trim · {{ trim.clip?.prompt || trim.clipId }}</h2>
+      <p class="wizard-context" v-if="trim.clip">Say: “{{ trim.clip.say }}”</p>
+      <div class="wave-wrap" ref="waveWrap">
+        <canvas
+          class="wave-canvas"
+          ref="waveCanvas"
+          @pointerdown="onWavePointerDown"
+          @pointermove="onWavePointerMove"
+          @pointerup="onWavePointerUp"
+          @pointerleave="onWavePointerUp"
+        ></canvas>
+        <div class="wave-times">
+          {{ formatSec(trim.inSec) }} – {{ formatSec(trim.outSec) }}
+          <span style="color:var(--muted)">({{ formatSec(trim.outSec - trim.inSec) }} selected)</span>
+        </div>
+      </div>
+      <div class="row-actions">
+        <button class="btn" type="button" @click="playSelection">Play selection</button>
+        <button class="btn" type="button" @click="resetHandles">Reset handles</button>
+        <button
+          class="btn"
+          type="button"
+          @click="normalizeTrimLevels"
+        >Normalise levels</button>
+        <button class="btn" type="button" @click="rerecordFromTrim" v-if="trim.fromPack || trim.fromRecord || trim.fromRolldown">Re-record</button>
+        <button class="btn primary" type="button" @click="saveTrim">Save clip</button>
+        <button class="btn ghost" type="button" @click="cancelTrim">Cancel</button>
+      </div>
+    </section>
+
+    <!-- Continuous 10→1 recording -->
+    <section v-else-if="mode === 'rolldown'" class="panel rolldown-panel">
+      <h2>Continuous 10 → 1</h2>
+      <p class="wizard-context">
+        Count-in, then Go, then speak each number with the on-screen beat. Recording holds one second after 1.
+        Levels are auto-normalised per digit so quieter words match louder ones.
+      </p>
+      <div class="rolldown-digit" :class="{ active: rolldown.phase === 'counting' || rolldown.phase === 'go' || rolldown.phase === 'hold' }">
+        <template v-if="rolldown.phase === 'idle'">Ready</template>
+        <template v-else-if="rolldown.phase === 'countdown'">{{ rolldown.countIn }}</template>
+        <template v-else-if="rolldown.phase === 'go'">Go</template>
+        <template v-else-if="rolldown.phase === 'counting'">{{ rolldown.digit }}</template>
+        <template v-else-if="rolldown.phase === 'hold'">1</template>
+        <template v-else>…</template>
+      </div>
+      <div class="rolldown-progress">
+        <span :style="{ width: rolldownProgress + '%' }"></span>
+      </div>
+      <p class="wizard-context" v-if="rolldown.hasClip">This voice already has a continuous take — record again to replace, or edit trim.</p>
+      <div class="row-actions" style="justify-content:center">
+        <button class="btn danger" type="button" v-if="rolldown.phase === 'idle'" @click="startRolldown">Start recording</button>
+        <button class="btn" type="button" v-if="rolldown.phase !== 'idle'" disabled>Recording…</button>
+        <button class="btn" type="button" v-if="rolldown.hasClip && rolldown.phase === 'idle'" @click="editRolldown">Edit trim</button>
+      </div>
+    </section>
+
+    <!-- Pack wizard -->
+    <section v-else-if="mode === 'pack'" class="panel">
+      <template v-if="packDone">
+        <h2>Pack walkthrough done</h2>
+        <p class="wizard-context">{{ clips.recorded_count }} of {{ clips.total }} clips recorded in this voice.</p>
+        <div class="row-actions">
+          <button class="btn primary" type="button" @click="setMode('library')">Back to library</button>
+          <button class="btn" type="button" @click="restartPack">Review again</button>
+        </div>
+      </template>
+      <template v-else-if="current">
+        <div class="wizard-progress">Clip {{ packIndex + 1 }} of {{ clips.lexicon.length }} · {{ clips.recorded_count }} recorded</div>
+        <div class="wizard-prompt">{{ current.prompt }}</div>
+        <div class="wizard-say">Say: “{{ current.say }}”</div>
+        <div class="wizard-context">{{ current.context }}</div>
+        <div v-if="recording" style="margin-bottom:1rem">
+          <span class="rec-indicator"></span> Recording…
+        </div>
+        <div class="meter"><span :style="{ width: (level * 100) + '%' }"></span></div>
+        <div class="row-actions">
+          <button class="btn danger" type="button" v-if="!recording" @click="startRec">Start recording</button>
+          <button class="btn" type="button" v-if="recording" @click="stopRec">Stop</button>
+          <button class="btn" type="button" v-if="current.recorded && !recording" @click="editExisting(current)">Edit trim</button>
+          <button class="btn ghost" type="button" v-if="!recording" @click="skipPack">Skip</button>
+        </div>
+        <p v-if="current.recorded" class="wizard-context">Already recorded — re-record to replace, edit trim, or skip.</p>
+      </template>
+    </section>
+
+    <!-- Library -->
+    <section v-else class="panel">
+      <div class="modal-head" style="margin-bottom:0.75rem">
+        <h2 style="margin:0">Clip library</h2>
+        <button
+          class="btn"
+          type="button"
+          :class="{ danger: playAllRunning }"
+          :disabled="!clips.recorded_count && !playAllRunning"
+          @click="togglePlayAll"
+        >{{ playAllRunning ? 'Stop' : 'Play all' }}</button>
+      </div>
+      <div class="clip-grid">
+        <div
+          v-for="clip in clips.lexicon"
+          :key="clip.id"
+          class="clip-card"
+          :class="[
+            clip.recorded ? 'ready' : 'missing',
+            { flash: flashClipId === clip.id },
+          ]"
+        >
+          <h3>{{ clip.prompt }}</h3>
+          <div class="ctx">{{ clip.context }}</div>
+          <div class="row-actions">
+            <button class="btn" type="button" :disabled="!clip.recorded || playAllRunning" @click="preview(clip.id)">Play</button>
+            <button class="btn" type="button" v-if="clip.recorded && !voiceLocked" :disabled="playAllRunning" @click="editExisting(clip)">Edit</button>
+            <button class="btn" type="button" v-if="!voiceLocked" :disabled="playAllRunning" @click="recordOne(clip)">Record</button>
+            <label v-if="!voiceLocked" class="btn" style="cursor:pointer" :style="playAllRunning ? 'opacity:0.45;pointer-events:none' : ''">
+              Upload
+              <input type="file" accept="audio/*,.wav,.mp3,.webm" hidden @change="uploadClip(clip.id, $event)" />
+            </label>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div v-if="toast" class="toast" @click="toast = null">{{ toast }}</div>
+  </div>
+
+  <script type="module">
+    import { api } from "/assets/js/api.js";
+    import {
+      MicRecorder,
+      blobToWav,
+      decodeToMono,
+      trimWav,
+      buildPeaks,
+      suggestTrimBounds,
+      normalizeSegmentPeaks,
+      normalizePeak,
+    } from "/assets/js/audio.js";
+
+    const { createApp, ref, reactive, computed, onMounted, nextTick, watch } = Vue;
+
+    createApp({
+      setup() {
+        const params = new URLSearchParams(location.search);
+        const ROLLDOWN_ID = "countdown_10_to_1";
+        const voices = ref([]);
+        const lockedVoiceIds = ref([]);
+        const selectedVoiceId = ref(params.get("voice") || "default");
+        const clips = reactive({
+          lexicon: [],
+          phrase_bank: [],
+          missing: [],
+          complete: false,
+          total: 0,
+          recorded_count: 0,
+          recorded_ids: [],
+        });
+        const initialMode = params.get("mode");
+        const mode = ref(
+          initialMode === "pack" || initialMode === "rolldown" ? initialMode : "library"
+        );
+        const packIndex = ref(0);
+        const packDone = ref(false);
+        const recording = ref(false);
+        const level = ref(0);
+        const toast = ref(null);
+        const flashClipId = ref(null);
+        const playAllRunning = ref(false);
+        let playAllStop = false;
+        let flashClipTimer = null;
+        const waveCanvas = ref(null);
+        const waveWrap = ref(null);
+        const rolldown = reactive({
+          phase: "idle", // idle | countdown | go | counting | hold
+          countIn: 3,
+          digit: 10,
+          hasClip: false,
+        });
+        // Count-in 3s + Go 1s + digits 10..1 (10s) + hold 1s after "1"
+        const ROLLDOWN_COUNT_IN = 3;
+        const ROLLDOWN_GO_SEC = 1;
+        const ROLLDOWN_DIGITS = 10;
+        const ROLLDOWN_HOLD_SEC = 1;
+        const ROLLDOWN_PREAMBLE = ROLLDOWN_COUNT_IN + ROLLDOWN_GO_SEC;
+        let mic = null;
+        let playCtx = null;
+        let playSource = null;
+        let peaksCache = null;
+        let dragHandle = null;
+        let playheadRaf = null;
+        let playStartedAt = 0;
+        let playBaseIn = 0;
+        let rolldownTimers = [];
+
+        const trim = reactive({
+          open: false,
+          clipId: null,
+          clip: null,
+          samples: null,
+          sampleRate: 48000,
+          duration: 0,
+          inSec: 0,
+          outSec: 0,
+          fromPack: false,
+          fromRecord: false,
+          fromRolldown: false,
+          playheadSec: null,
+        });
+
+        const voiceLocked = computed(() => lockedVoiceIds.value.includes(selectedVoiceId.value));
+        const current = computed(() => clips.lexicon[packIndex.value] || null);
+        const activeVoiceName = computed(() => {
+          const v = voices.value.find((x) => x.id === selectedVoiceId.value);
+          return v ? v.name : selectedVoiceId.value;
+        });
+        const rolldownProgress = computed(() => {
+          const total = ROLLDOWN_PREAMBLE + ROLLDOWN_DIGITS + ROLLDOWN_HOLD_SEC;
+          if (rolldown.phase === "countdown") {
+            return ((ROLLDOWN_COUNT_IN - rolldown.countIn) / total) * 100;
+          }
+          if (rolldown.phase === "go") {
+            return (ROLLDOWN_COUNT_IN / total) * 100;
+          }
+          if (rolldown.phase === "counting") {
+            return ((ROLLDOWN_PREAMBLE + (10 - rolldown.digit)) / total) * 100;
+          }
+          if (rolldown.phase === "hold") {
+            return ((ROLLDOWN_PREAMBLE + ROLLDOWN_DIGITS) / total) * 100;
+          }
+          return 0;
+        });
+
+        function showToast(msg) {
+          toast.value = msg;
+          setTimeout(() => { if (toast.value === msg) toast.value = null; }, 4000);
+        }
+
+        function formatSec(s) {
+          if (s == null || Number.isNaN(s)) return "0.00s";
+          return `${Number(s).toFixed(2)}s`;
+        }
+
+        function clearRolldownTimers() {
+          rolldownTimers.forEach((t) => clearTimeout(t));
+          rolldownTimers = [];
+        }
+
+        function updateRolldownHasClip() {
+          rolldown.hasClip = (clips.recorded_ids || []).includes(ROLLDOWN_ID);
+        }
+
+        function rolldownClipMeta() {
+          return (clips.lexicon || []).find((c) => c.id === ROLLDOWN_ID) || {
+            id: ROLLDOWN_ID,
+            prompt: "10 to 1 countdown",
+            say: "ten, nine, eight… one",
+            context: "Continuous 10→1 roll-down",
+          };
+        }
+
+        async function loadVoices() {
+          const data = await api("/api/voices");
+          voices.value = data.voices || [];
+          lockedVoiceIds.value = data.locked_voice_ids || [];
+          if (!voices.value.find((v) => v.id === selectedVoiceId.value)) {
+            selectedVoiceId.value = data.active_voice_id || voices.value[0]?.id || "default";
+          }
+        }
+
+        async function loadClips() {
+          const data = await api(`/api/voices/${encodeURIComponent(selectedVoiceId.value)}/clips`);
+          Object.assign(clips, data);
+          updateRolldownHasClip();
+        }
+
+        async function refresh() {
+          await loadVoices();
+          await loadClips();
+          if (voiceLocked.value && (mode.value === "pack" || mode.value === "rolldown")) {
+            mode.value = "library";
+            syncUrl();
+          }
+        }
+
+        async function onVoiceChange() {
+          packDone.value = false;
+          clearRolldownTimers();
+          rolldown.phase = "idle";
+          await loadClips();
+          if (voiceLocked.value && (mode.value === "pack" || mode.value === "rolldown")) {
+            mode.value = "library";
+          }
+          syncUrl();
+        }
+
+        function setMode(m) {
+          if (voiceLocked.value && (m === "pack" || m === "rolldown")) {
+            showToast("Default voice is locked — create a new voice to record");
+            m = "library";
+          }
+          mode.value = m;
+          packDone.value = false;
+          clearRolldownTimers();
+          rolldown.phase = "idle";
+          if (m === "pack") {
+            const startId = params.get("clip");
+            if (startId) {
+              const i = clips.lexicon.findIndex((c) => c.id === startId);
+              packIndex.value = i >= 0 ? i : firstMissingIndex();
+            } else {
+              packIndex.value = firstMissingIndex();
+            }
+          }
+          syncUrl();
+        }
+
+        function firstMissingIndex() {
+          const i = clips.lexicon.findIndex((c) => !c.recorded);
+          return i >= 0 ? i : 0;
+        }
+
+        function syncUrl() {
+          const q = new URLSearchParams();
+          q.set("mode", mode.value);
+          q.set("voice", selectedVoiceId.value);
+          const clip = params.get("clip");
+          if (clip && mode.value === "pack") q.set("clip", clip);
+          history.replaceState(null, "", `/voice?${q}`);
+        }
+
+        async function createVoice() {
+          const name = window.prompt("Name for the new voice pack:");
+          if (!name || !name.trim()) return;
+          const r = await api("/api/voices", { method: "POST", json: { name: name.trim() } });
+          voices.value = r.profile.voices;
+          selectedVoiceId.value = r.voice.id;
+          await loadClips();
+          showToast(`Created “${r.voice.name}”`);
+          syncUrl();
+        }
+
+        async function renameVoice() {
+          if (voiceLocked.value) {
+            showToast("Default voice is locked");
+            return;
+          }
+          const cur = voices.value.find((v) => v.id === selectedVoiceId.value);
+          const name = window.prompt("Rename voice pack:", cur?.name || "");
+          if (!name || !name.trim()) return;
+          const r = await api(`/api/voices/${encodeURIComponent(selectedVoiceId.value)}`, {
+            method: "PATCH",
+            json: { name: name.trim() },
+          });
+          voices.value = r.profile.voices;
+          showToast("Renamed");
+        }
+
+        async function deleteVoice() {
+          if (voiceLocked.value) return;
+          if (voices.value.length <= 1) return;
+          if (!window.confirm(`Delete voice pack “${activeVoiceName.value}”? Recordings will be removed.`)) return;
+          const r = await api(`/api/voices/${encodeURIComponent(selectedVoiceId.value)}`, { method: "DELETE" });
+          voices.value = r.profile.voices;
+          selectedVoiceId.value = r.profile.active_voice_id;
+          await loadClips();
+          showToast("Voice deleted");
+          syncUrl();
+        }
+
+        async function preview(id, { wait = false } = {}) {
+          const q = wait ? "?wait=true" : "";
+          await api(
+            `/api/voices/${encodeURIComponent(selectedVoiceId.value)}/clips/${encodeURIComponent(id)}/preview${q}`,
+            { method: "POST" },
+          );
+        }
+
+        function flashClip(id) {
+          if (flashClipTimer) clearTimeout(flashClipTimer);
+          flashClipId.value = null;
+          // Force animation re-trigger
+          requestAnimationFrame(() => {
+            flashClipId.value = id;
+            flashClipTimer = setTimeout(() => {
+              if (flashClipId.value === id) flashClipId.value = null;
+            }, 1100);
+          });
+        }
+
+        function sleep(ms) {
+          return new Promise((resolve) => setTimeout(resolve, ms));
+        }
+
+        async function togglePlayAll() {
+          if (playAllRunning.value) {
+            playAllStop = true;
+            try {
+              await api("/api/audio/stop", { method: "POST" });
+            } catch (_) { /* ignore */ }
+            return;
+          }
+          const recorded = (clips.lexicon || []).filter((c) => c.recorded);
+          if (!recorded.length) {
+            showToast("No recorded clips to play");
+            return;
+          }
+          playAllStop = false;
+          playAllRunning.value = true;
+          try {
+            for (let i = 0; i < recorded.length; i++) {
+              if (playAllStop) break;
+              const clip = recorded[i];
+              flashClip(clip.id);
+              try {
+                await preview(clip.id, { wait: true });
+              } catch (e) {
+                if (playAllStop) break;
+                showToast(String(e.message || e));
+                break;
+              }
+              if (playAllStop) break;
+              if (i < recorded.length - 1) {
+                await sleep(500);
+              }
+            }
+          } finally {
+            playAllRunning.value = false;
+            playAllStop = false;
+            flashClipId.value = null;
+          }
+        }
+
+        async function uploadClip(id, ev) {
+          const file = ev.target.files?.[0];
+          if (!file) return;
+          let blob = file;
+          if (!file.name.toLowerCase().endsWith(".wav") && file.type !== "audio/wav") {
+            try {
+              blob = await blobToWav(file);
+            } catch (e) {
+              showToast("Could not convert audio — try WAV");
+              return;
+            }
+          }
+          const fd = new FormData();
+          fd.append("file", blob, `${id}.wav`);
+          const res = await fetch(
+            `/api/voices/${encodeURIComponent(selectedVoiceId.value)}/clips/${encodeURIComponent(id)}`,
+            { method: "POST", body: fd },
+          );
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            showToast(err.detail || "Upload failed");
+            return;
+          }
+          await loadClips();
+          showToast(`Saved ${id}`);
+          ev.target.value = "";
+        }
+
+        async function openTrimFromDecoded(clip, samples, sampleRate, opts = {}) {
+          let pcm = samples;
+          const isRolldown = !!opts.fromRolldown || clip.id === ROLLDOWN_ID;
+          if (isRolldown) {
+            pcm = normalizeSegmentPeaks(samples, sampleRate);
+          } else {
+            pcm = normalizePeak(samples);
+          }
+          const duration = pcm.length / sampleRate;
+          const bounds = suggestTrimBounds(pcm, sampleRate);
+          trim.open = true;
+          trim.clipId = clip.id;
+          trim.clip = clip;
+          trim.samples = pcm;
+          trim.sampleRate = sampleRate;
+          trim.duration = duration;
+          trim.inSec = bounds.startSec;
+          trim.outSec = bounds.endSec;
+          trim.fromPack = !!opts.fromPack;
+          trim.fromRecord = !!opts.fromRecord;
+          trim.fromRolldown = isRolldown;
+          trim.playheadSec = null;
+          peaksCache = buildPeaks(pcm, 500);
+          await nextTick();
+          drawWave();
+        }
+
+        async function normalizeTrimLevels() {
+          if (!trim.samples) return;
+          stopPlayhead();
+          try { playSource?.stop?.(); } catch (_) { /* ignore */ }
+          const isRolldown = trim.fromRolldown || trim.clipId === ROLLDOWN_ID;
+          trim.samples = isRolldown
+            ? normalizeSegmentPeaks(trim.samples, trim.sampleRate)
+            : normalizePeak(trim.samples);
+          peaksCache = buildPeaks(trim.samples, 500);
+          const bounds = suggestTrimBounds(trim.samples, trim.sampleRate);
+          trim.inSec = bounds.startSec;
+          trim.outSec = bounds.endSec;
+          trim.duration = trim.samples.length / trim.sampleRate;
+          drawWave();
+          showToast("Levels normalised");
+        }
+
+        async function editExisting(clip, opts = {}) {
+          if (voiceLocked.value) {
+            showToast("Default voice is locked — create a new voice to edit");
+            return;
+          }
+          try {
+            const res = await fetch(
+              `/api/voices/${encodeURIComponent(selectedVoiceId.value)}/clips/${encodeURIComponent(clip.id)}/audio`,
+            );
+            if (!res.ok) throw new Error("Could not load clip");
+            const buf = await res.arrayBuffer();
+            const { samples, sampleRate } = await decodeToMono(buf);
+            await openTrimFromDecoded(clip, samples, sampleRate, {
+              fromPack: opts.fromPack || mode.value === "pack",
+              fromRolldown: !!opts.fromRolldown,
+            });
+          } catch (e) {
+            showToast(String(e.message || e));
+          }
+        }
+
+        function recordOne(clip) {
+          if (voiceLocked.value) {
+            showToast("Default voice is locked — create a new voice to record");
+            return;
+          }
+          mode.value = "pack";
+          const i = clips.lexicon.findIndex((c) => c.id === clip.id);
+          packIndex.value = i >= 0 ? i : 0;
+          packDone.value = false;
+          syncUrl();
+        }
+
+        async function startRec() {
+          if (voiceLocked.value) {
+            showToast("Default voice is locked — create a new voice to record");
+            return;
+          }
+          mic = new MicRecorder();
+          mic.onLevel = (v) => { level.value = v; };
+          await mic.start();
+          recording.value = true;
+        }
+
+        async function stopRec() {
+          recording.value = false;
+          const blob = await mic.stop();
+          mic = null;
+          if (!blob || !current.value) return;
+          try {
+            const wav = await blobToWav(blob);
+            const { samples, sampleRate } = await decodeToMono(wav);
+            await openTrimFromDecoded(current.value, samples, sampleRate, {
+              fromPack: true,
+              fromRecord: true,
+            });
+          } catch (e) {
+            showToast("Could not convert recording: " + e);
+          }
+        }
+
+        function drawWave() {
+          const canvas = waveCanvas.value;
+          if (!canvas || !peaksCache) return;
+          const wrap = waveWrap.value;
+          const dpr = window.devicePixelRatio || 1;
+          const cssW = wrap ? wrap.clientWidth : 640;
+          const cssH = 120;
+          canvas.width = Math.floor(cssW * dpr);
+          canvas.height = Math.floor(cssH * dpr);
+          canvas.style.width = `${cssW}px`;
+          canvas.style.height = `${cssH}px`;
+          const ctx = canvas.getContext("2d");
+          ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+          ctx.clearRect(0, 0, cssW, cssH);
+          ctx.fillStyle = "#171b20";
+          ctx.fillRect(0, 0, cssW, cssH);
+
+          const mid = cssH / 2;
+          const n = peaksCache.length;
+          const inX = (trim.inSec / trim.duration) * cssW;
+          const outX = (trim.outSec / trim.duration) * cssW;
+
+          ctx.fillStyle = "rgba(14,17,20,0.65)";
+          ctx.fillRect(0, 0, inX, cssH);
+          ctx.fillRect(outX, 0, cssW - outX, cssH);
+
+          for (let i = 0; i < n; i++) {
+            const x = (i / n) * cssW;
+            const h = peaksCache[i] * (cssH * 0.42);
+            const inside = x >= inX && x <= outX;
+            ctx.fillStyle = inside ? "#3dbe9c" : "#4a5560";
+            ctx.fillRect(x, mid - h, Math.max(1, cssW / n), h * 2);
+          }
+
+          ctx.strokeStyle = "#e8edf2";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(inX, 0);
+          ctx.lineTo(inX, cssH);
+          ctx.moveTo(outX, 0);
+          ctx.lineTo(outX, cssH);
+          ctx.stroke();
+
+          if (trim.playheadSec != null && trim.duration > 0) {
+            const ph = Math.min(Math.max(trim.playheadSec, trim.inSec), trim.outSec);
+            const phX = (ph / trim.duration) * cssW;
+            ctx.strokeStyle = "#e6a23c";
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(phX, 0);
+            ctx.lineTo(phX, cssH);
+            ctx.stroke();
+          }
+        }
+
+        function xToSec(clientX) {
+          const canvas = waveCanvas.value;
+          const rect = canvas.getBoundingClientRect();
+          const x = Math.min(Math.max(clientX - rect.left, 0), rect.width);
+          return (x / rect.width) * trim.duration;
+        }
+
+        function nearestHandle(sec) {
+          const hit = 0.04 * trim.duration || 0.05;
+          if (Math.abs(sec - trim.inSec) <= hit) return "in";
+          if (Math.abs(sec - trim.outSec) <= hit) return "out";
+          return null;
+        }
+
+        function onWavePointerDown(ev) {
+          const sec = xToSec(ev.clientX);
+          dragHandle = nearestHandle(sec) || (sec < (trim.inSec + trim.outSec) / 2 ? "in" : "out");
+          waveCanvas.value?.setPointerCapture?.(ev.pointerId);
+          onWavePointerMove(ev);
+        }
+
+        function onWavePointerMove(ev) {
+          if (!dragHandle) return;
+          const sec = xToSec(ev.clientX);
+          const minLen = 0.05;
+          if (dragHandle === "in") {
+            trim.inSec = Math.min(Math.max(0, sec), trim.outSec - minLen);
+          } else {
+            trim.outSec = Math.max(Math.min(trim.duration, sec), trim.inSec + minLen);
+          }
+          drawWave();
+        }
+
+        function onWavePointerUp() {
+          dragHandle = null;
+        }
+
+        function resetHandles() {
+          if (!trim.samples) return;
+          const bounds = suggestTrimBounds(trim.samples, trim.sampleRate);
+          trim.inSec = bounds.startSec;
+          trim.outSec = bounds.endSec;
+          drawWave();
+        }
+
+        function stopPlayhead() {
+          if (playheadRaf) {
+            cancelAnimationFrame(playheadRaf);
+            playheadRaf = null;
+          }
+          trim.playheadSec = null;
+        }
+
+        function tickPlayhead() {
+          if (!playCtx) {
+            stopPlayhead();
+            drawWave();
+            return;
+          }
+          const elapsed = playCtx.currentTime - playStartedAt;
+          const sec = playBaseIn + elapsed;
+          if (sec >= trim.outSec) {
+            trim.playheadSec = trim.outSec;
+            drawWave();
+            stopPlayhead();
+            drawWave();
+            return;
+          }
+          trim.playheadSec = sec;
+          drawWave();
+          playheadRaf = requestAnimationFrame(tickPlayhead);
+        }
+
+        async function playSelection() {
+          if (!trim.samples) return;
+          stopPlayhead();
+          try {
+            playSource?.stop?.();
+          } catch (_) { /* ignore */ }
+          playCtx = playCtx || new (window.AudioContext || window.webkitAudioContext)();
+          if (playCtx.state === "suspended") await playCtx.resume();
+          const start = Math.floor(trim.inSec * trim.sampleRate);
+          const end = Math.ceil(trim.outSec * trim.sampleRate);
+          const slice = trim.samples.subarray(start, end);
+          const buf = playCtx.createBuffer(1, slice.length, trim.sampleRate);
+          buf.copyToChannel(new Float32Array(slice), 0);
+          playSource = playCtx.createBufferSource();
+          playSource.buffer = buf;
+          playSource.connect(playCtx.destination);
+          playBaseIn = trim.inSec;
+          playStartedAt = playCtx.currentTime;
+          trim.playheadSec = trim.inSec;
+          playSource.onended = () => {
+            stopPlayhead();
+            drawWave();
+          };
+          playSource.start();
+          playheadRaf = requestAnimationFrame(tickPlayhead);
+        }
+
+        async function saveTrim() {
+          try {
+            const blob = trimWav(trim.samples, trim.sampleRate, trim.inSec, trim.outSec);
+            const fd = new FormData();
+            fd.append("file", blob, `${trim.clipId}.wav`);
+            const res = await fetch(
+              `/api/voices/${encodeURIComponent(selectedVoiceId.value)}/clips/${encodeURIComponent(trim.clipId)}`,
+              { method: "POST", body: fd },
+            );
+            if (!res.ok) {
+              const err = await res.json().catch(() => ({}));
+              showToast(err.detail || "Save failed");
+              return;
+            }
+            const fromPack = trim.fromPack;
+            const fromRolldown = trim.fromRolldown;
+            cancelTrim();
+            await loadClips();
+            showToast("Clip saved");
+            if (fromPack) advancePack();
+            else if (fromRolldown) setMode("rolldown");
+          } catch (e) {
+            showToast(String(e.message || e));
+          }
+        }
+
+        function cancelTrim() {
+          stopPlayhead();
+          try { playSource?.stop?.(); } catch (_) { /* ignore */ }
+          trim.open = false;
+          trim.samples = null;
+          trim.clip = null;
+          trim.clipId = null;
+          trim.fromRolldown = false;
+          peaksCache = null;
+        }
+
+        function rerecordFromTrim() {
+          const againRolldown = trim.fromRolldown;
+          cancelTrim();
+          if (againRolldown) startRolldown();
+          else startRec();
+        }
+
+        async function startRolldown() {
+          if (voiceLocked.value) {
+            showToast("Default voice is locked — create a new voice to record");
+            return;
+          }
+          clearRolldownTimers();
+          try {
+            mic = new MicRecorder();
+            mic.onLevel = (v) => { level.value = v; };
+            await mic.start();
+          } catch (e) {
+            showToast("Microphone failed: " + e);
+            return;
+          }
+          recording.value = true;
+          rolldown.phase = "countdown";
+          rolldown.countIn = ROLLDOWN_COUNT_IN;
+          // Count-in 3, 2, 1 → Go → 10..1 → hold 1s
+          for (let i = 0; i < ROLLDOWN_COUNT_IN; i++) {
+            const n = ROLLDOWN_COUNT_IN - i;
+            rolldownTimers.push(setTimeout(() => {
+              rolldown.phase = "countdown";
+              rolldown.countIn = n;
+            }, i * 1000));
+          }
+          rolldownTimers.push(setTimeout(() => {
+            rolldown.phase = "go";
+          }, ROLLDOWN_COUNT_IN * 1000));
+          for (let d = 10; d >= 1; d--) {
+            const delay = (ROLLDOWN_PREAMBLE + (10 - d)) * 1000;
+            rolldownTimers.push(setTimeout(() => {
+              rolldown.phase = "counting";
+              rolldown.digit = d;
+            }, delay));
+          }
+          const holdAt = (ROLLDOWN_PREAMBLE + ROLLDOWN_DIGITS) * 1000;
+          rolldownTimers.push(setTimeout(() => {
+            rolldown.phase = "hold";
+            rolldown.digit = 1;
+          }, holdAt));
+          rolldownTimers.push(setTimeout(() => {
+            finishRolldownRecord();
+          }, holdAt + ROLLDOWN_HOLD_SEC * 1000));
+        }
+
+        async function finishRolldownRecord() {
+          clearRolldownTimers();
+          rolldown.phase = "idle";
+          recording.value = false;
+          if (!mic) return;
+          const blob = await mic.stop();
+          mic = null;
+          if (!blob) return;
+          try {
+            const wav = await blobToWav(blob);
+            const { samples, sampleRate } = await decodeToMono(wav);
+            await openTrimFromDecoded(rolldownClipMeta(), samples, sampleRate, {
+              fromRolldown: true,
+              fromRecord: true,
+            });
+          } catch (e) {
+            showToast("Could not convert recording: " + e);
+          }
+        }
+
+        async function editRolldown() {
+          await editExisting(rolldownClipMeta(), { fromRolldown: true });
+        }
+
+        function skipPack() {
+          advancePack();
+        }
+
+        function advancePack() {
+          if (packIndex.value + 1 >= clips.lexicon.length) {
+            packDone.value = true;
+          } else {
+            packIndex.value += 1;
+          }
+        }
+
+        function restartPack() {
+          packDone.value = false;
+          packIndex.value = 0;
+        }
+
+        watch(() => [trim.inSec, trim.outSec, trim.open], () => {
+          if (trim.open) nextTick(drawWave);
+        });
+
+        onMounted(async () => {
+          await refresh();
+          if (voiceLocked.value && (mode.value === "pack" || mode.value === "rolldown")) {
+            mode.value = "library";
+            syncUrl();
+          } else if (mode.value === "pack") {
+            const startId = params.get("clip");
+            if (startId) {
+              const i = clips.lexicon.findIndex((c) => c.id === startId);
+              packIndex.value = i >= 0 ? i : firstMissingIndex();
+            } else {
+              packIndex.value = firstMissingIndex();
+            }
+          }
+          window.addEventListener("resize", () => { if (trim.open) drawWave(); });
+        });
+
+        return {
+          voices,
+          voiceLocked,
+          selectedVoiceId,
+          clips,
+          mode,
+          packIndex,
+          packDone,
+          recording,
+          level,
+          toast,
+          trim,
+          current,
+          rolldown,
+          rolldownProgress,
+          waveCanvas,
+          waveWrap,
+          formatSec,
+          onVoiceChange,
+          setMode,
+          createVoice,
+          renameVoice,
+          deleteVoice,
+          preview,
+          togglePlayAll,
+          flashClipId,
+          playAllRunning,
+          uploadClip,
+          editExisting,
+          recordOne,
+          startRec,
+          stopRec,
+          onWavePointerDown,
+          onWavePointerMove,
+          onWavePointerUp,
+          resetHandles,
+          playSelection,
+          normalizeTrimLevels,
+          saveTrim,
+          cancelTrim,
+          rerecordFromTrim,
+          skipPack,
+          restartPack,
+          startRolldown,
+          editRolldown,
+        };
+      },
+    }).mount("#app");
+  </script>
+</body>
+</html>

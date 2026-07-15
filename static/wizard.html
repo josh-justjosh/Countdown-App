@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Record voice pack</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;650&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/assets/css/app.css" />
+  <script src="https://cdn.jsdelivr.net/npm/vue@3.5.13/dist/vue.global.prod.js"></script>
+</head>
+<body>
+  <div id="app" class="wizard-shell">
+    <div style="text-align:left;margin-bottom:1rem">
+      <a href="/">&larr; Back to control</a>
+    </div>
+
+    <template v-if="done">
+      <h1>Voice pack complete</h1>
+      <p class="wizard-context">{{ recordedCount }} of {{ clips.length }} clips recorded.</p>
+      <div class="row-actions" style="justify-content:center">
+        <a class="btn primary" href="/">Return to control</a>
+        <button class="btn" @click="restart">Review / re-record</button>
+      </div>
+    </template>
+
+    <template v-else-if="current">
+      <div class="wizard-progress">Clip {{ index + 1 }} of {{ clips.length }} · {{ recordedCount }} recorded</div>
+      <div class="wizard-prompt">{{ current.prompt }}</div>
+      <div class="wizard-say">Say: “{{ current.say }}”</div>
+      <div class="wizard-context">{{ current.context }}</div>
+
+      <div v-if="recording" style="margin-bottom:1rem">
+        <span class="rec-indicator"></span> Recording…
+      </div>
+      <div class="meter"><span :style="{ width: (level * 100) + '%' }"></span></div>
+
+      <div class="row-actions" style="justify-content:center">
+        <button class="btn danger" v-if="!recording && !previewUrl" @click="startRec">Start recording</button>
+        <button class="btn" v-if="recording" @click="stopRec">Stop</button>
+        <button class="btn" v-if="previewUrl && !recording" @click="playPreview">Play back</button>
+        <button class="btn primary" v-if="previewUrl && !recording" @click="keep">Keep &amp; next</button>
+        <button class="btn" v-if="previewUrl && !recording" @click="rerecord">Re-record</button>
+        <button class="btn ghost" v-if="!recording" @click="skip">Skip</button>
+      </div>
+
+      <p v-if="current.recorded && !previewUrl" class="wizard-context">Already recorded — re-record to replace, or skip.</p>
+      <audio v-if="previewUrl" :src="previewUrl" ref="player" style="display:none"></audio>
+    </template>
+  </div>
+
+  <script type="module">
+    import { api } from "/assets/js/api.js";
+    import { MicRecorder, blobToWav } from "/assets/js/audio.js";
+
+    const { createApp, ref, computed, onMounted, nextTick } = Vue;
+
+    createApp({
+      setup() {
+        const clips = ref([]);
+        const index = ref(0);
+        const recording = ref(false);
+        const level = ref(0);
+        const previewUrl = ref(null);
+        const previewBlob = ref(null);
+        const done = ref(false);
+        const player = ref(null);
+        let mic = null;
+
+        const current = computed(() => clips.value[index.value] || null);
+        const recordedCount = computed(() => clips.value.filter((c) => c.recorded).length);
+
+        async function load() {
+          const data = await api("/api/clips");
+          clips.value = data.lexicon;
+          const params = new URLSearchParams(location.search);
+          const startId = params.get("clip");
+          if (startId) {
+            const i = clips.value.findIndex((c) => c.id === startId);
+            if (i >= 0) index.value = i;
+          } else {
+            const firstMissing = clips.value.findIndex((c) => !c.recorded);
+            index.value = firstMissing >= 0 ? firstMissing : 0;
+          }
+        }
+
+        async function startRec() {
+          previewUrl.value = null;
+          previewBlob.value = null;
+          mic = new MicRecorder();
+          mic.onLevel = (v) => { level.value = v; };
+          await mic.start();
+          recording.value = true;
+        }
+
+        async function stopRec() {
+          recording.value = false;
+          const blob = await mic.stop();
+          mic = null;
+          if (!blob) return;
+          try {
+            const wav = await blobToWav(blob);
+            previewBlob.value = wav;
+            previewUrl.value = URL.createObjectURL(wav);
+          } catch (e) {
+            alert("Could not convert recording: " + e);
+          }
+        }
+
+        function playPreview() {
+          nextTick(() => player.value?.play());
+        }
+
+        function rerecord() {
+          if (previewUrl.value) URL.revokeObjectURL(previewUrl.value);
+          previewUrl.value = null;
+          previewBlob.value = null;
+        }
+
+        async function keep() {
+          if (!previewBlob.value || !current.value) return;
+          const fd = new FormData();
+          fd.append("file", previewBlob.value, `${current.value.id}.wav`);
+          const res = await fetch(`/api/clips/${encodeURIComponent(current.value.id)}`, {
+            method: "POST",
+            body: fd,
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            alert(err.detail || "Save failed");
+            return;
+          }
+          current.value.recorded = true;
+          advance();
+        }
+
+        function skip() {
+          advance();
+        }
+
+        function advance() {
+          rerecord();
+          if (index.value + 1 >= clips.value.length) {
+            done.value = true;
+          } else {
+            index.value += 1;
+          }
+        }
+
+        function restart() {
+          done.value = false;
+          index.value = 0;
+        }
+
+        onMounted(load);
+
+        return {
+          clips,
+          index,
+          current,
+          recording,
+          level,
+          previewUrl,
+          done,
+          player,
+          recordedCount,
+          startRec,
+          stopRec,
+          playPreview,
+          keep,
+          skip,
+          rerecord,
+          restart,
+        };
+      },
+    }).mount("#app");
+  </script>
+</body>
+</html>

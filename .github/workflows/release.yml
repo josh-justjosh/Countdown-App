@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            artifact: VT-Vocal-Countdown-macOS-arm64.zip
+            shell: bash
+          - os: windows-latest
+            artifact: VT-Vocal-Countdown-Windows-x64.zip
+            shell: pwsh
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          chmod +x scripts/build_release.sh
+          ./scripts/build_release.sh
+          # Normalise zip name for Apple Silicon runners
+          SRC=$(ls dist/VT-Vocal-Countdown-macOS-*.zip | head -1)
+          mv "$SRC" "dist/${{ matrix.artifact }}"
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\scripts\build_release.ps1
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Flatten assets
+        run: |
+          mkdir -p out
+          find release-assets -type f -name '*.zip' -exec cp {} out/ \;
+          ls -lh out/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

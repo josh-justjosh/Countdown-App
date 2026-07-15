@@ -1,137 +1,1203 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Audio Countdown App</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VT Vocal Countdown</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;650&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/assets/css/app.css" />
+  <script src="https://cdn.jsdelivr.net/npm/vue@3.5.13/dist/vue.global.prod.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.5/dist/socket.io.min.js"></script>
 </head>
 <body>
-    <div class="container">
-        <h1>Audio Countdown Control</h1>
+  <div id="app" class="app-shell">
+    <header class="app-header">
+      <div>
+        <h1>VT Vocal Countdown</h1>
+        <div class="sub">QLab &amp; vMix spoken media countdowns</div>
+      </div>
+      <div class="nav-actions">
+        <a class="btn" href="/voice">Manage voice</a>
+        <button class="btn" @click="openDisplay">Open display</button>
+        <button class="btn" @click="exportPack">Export</button>
+        <label class="btn" style="cursor:pointer">
+          Import
+          <input type="file" accept=".zip,application/zip" hidden @change="importPack" />
+        </label>
+      </div>
+    </header>
 
-        <div class="modes">
-            <div class="mode-section" id="item-countdown-section">
-                <h2>Countdown to Specific Item</h2>
-                <form id="item-countdown-form">
-                    <label for="item-name">Item Name:</label>
-                    <input type="text" id="item-name" required><br>
+    <div class="grid-2">
+      <section class="panel">
+        <h2>Live</h2>
+        <div class="live-clock">{{ formatTime(status.remaining_seconds) }}</div>
+        <div class="live-meta">
+          <span :class="['status-pill', status.armed ? 'ok' : '']">{{ status.armed ? 'Armed' : 'Disarmed' }}</span>
+          <span :class="['status-pill', linkPillClass]">{{ linkLabel }}</span>
+          <div style="margin-top:0.5rem">{{ status.label || '—' }} · {{ status.message || '' }}</div>
+        </div>
+        <p v-if="status.armed && !status.connected" class="live-meta" style="color:var(--danger)">
+          Lost connection to source — still armed; will resume when the link returns.
+        </p>
+        <p v-else-if="status.armed && status.connected && status.remaining_seconds == null" class="live-meta" style="color:var(--warn)">
+          Connected, waiting for media with a countable duration…
+        </p>
+        <div class="row-actions">
+          <button class="btn primary" :disabled="status.armed || !clips.complete" @click="arm">Arm</button>
+          <button class="btn danger" :disabled="!status.armed" @click="disarm">Disarm</button>
+          <button class="btn" @click="testConnection">Test connection</button>
+        </div>
+        <p v-if="!clips.complete" class="live-meta" style="color:var(--warn)">
+          Missing {{ clips.missing.length }} clip(s) for enabled rows.
+          <a href="/voice?mode=pack">Manage voice</a>
+        </p>
+      </section>
 
-                    <label for="target-datetime">Target Date/Time:</label>
-                    <input type="datetime-local" id="target-datetime" required><br>
-
-                    <h3>Verbalization Options:</h3>
-                    <div class="verbal-options">
-                        <label><input type="checkbox" name="interval" value="3600"> 1 Hour</label>
-                        <label><input type="checkbox" name="interval" value="2700"> 45 Minutes</label>
-                        <label><input type="checkbox" name="interval" value="1800"> 30 Minutes</label>
-                        <label><input type="checkbox" name="interval" value="1200"> 20 Minutes</label>
-                        <label><input type="checkbox" name="interval" value="900"> 15 Minutes</label>
-                        <label><input type="checkbox" name="interval" value="600"> 10 Minutes</label>
-                        <label><input type="checkbox" name="interval" value="300"> 5 Minutes</label>
-                        <label><input type="checkbox" name="interval" value="180"> 3 Minutes</label>
-                        <label><input type="checkbox" name="interval" value="120"> 2 Minutes</label>
-                        <label><input type="checkbox" name="interval" value="90"> 90 Seconds</label>
-                        <label><input type="checkbox" name="interval" value="60"> 60 Seconds</label>
-                        <label><input type="checkbox" name="interval" value="45"> 45 Seconds</label>
-                        <label><input type="checkbox" name="interval" value="30"> 30 Seconds</label>
-                        <label><input type="checkbox" name="interval" value="20"> 20 Seconds</label>
-                        <label><input type="checkbox" name="interval" value="15"> 15 Seconds</label>
-                        <br>
-                        <label>
-                            Countdown from:
-                            <select name="countdown-from-select" class="countdown-from-select">
-                                <option value="">None</option>
-                                <option value="10s">10 Seconds</option>
-                                <option value="5s">5 Seconds</option>
-                            </select>
-                        </label>
-                        <label class="verbalize-10s-option" style="display: none;">
-                            <input type="checkbox" name="verbalize-10s-on-5s"> Verbalize 10s (if 5s selected)
-                        </label>
-                    </div>
-                    <label for="item-format-string">Verbalization Format (e.g., "VT Out in {time_value} {time_unit}"):</label>
-                    <input type="text" id="item-format-string" value="{name} in {time_value} {time_unit}" required><br>
-
-                    <button type="submit">Start Item Countdown</button>
-                </form>
-            </div>
-
-            <div class="mode-section" id="vt-countdown-section">
-                <h2>Video (VT) Countdown (API Polling)</h2>
-                <form id="vt-countdown-form">
-                    <label for="vt-name">VT Name (for verbalization):</label>
-                    <input type="text" id="vt-name" value="VT" required><br>
-
-                    <h3>API Configuration:</h3>
-                    <h4>vMix Settings:</h4>
-                    <label for="vmix-ip">vMix IP Address:</label>
-                    <input type="text" id="vmix-ip" value="127.0.0.1"><br>
-                    <label for="vmix-port">vMix Port:</label>
-                    <input type="number" id="vmix-port" value="8088"><br>
-                    <label for="vmix-fallback1">vMix Fallback Input 1 (Name/Number):</label>
-                    <input type="text" id="vmix-fallback1"><br>
-                    <label for="vmix-fallback2">vMix Fallback Input 2 (Name/Number):</label>
-                    <input type="text" id="vmix-fallback2"><br>
-
-                    <h4>QLab Settings:</h4>
-                    <label for="qlab-ip">QLab IP Address:</label>
-                    <input type="text" id="qlab-ip" value="127.0.0.1"><br>
-                    <label for="qlab-send-port">QLab Send OSC Port:</label>
-                    <input type="number" id="qlab-send-port" value="53000"><br>
-                    <label for="qlab-listen-port">QLab Listen OSC Port (for replies):</label>
-                    <input type="number" id="qlab-listen-port" value="53001" readonly title="This port is used by the Python app to listen for QLab replies and is set by the server."></br>
-                    <p class="note">
-                        For QLab integration to work, ensure QLab is configured to send OSC replies to this application's IP and the specified "QLab Listen OSC Port" (default 53001).
-                        The application will attempt to find the active "Video" cue.
-                    </p>
-
-                    <h3>Verbalization Options:</h3>
-                    <div class="verbal-options">
-                        <label><input type="checkbox" name="vt-interval" value="3600"> 1 Hour</label>
-                        <label><input type="checkbox" name="vt-interval" value="2700"> 45 Minutes</label>
-                        <label><input type="checkbox" name="vt-interval" value="1800"> 30 Minutes</label>
-                        <label><input type="checkbox" name="vt-interval" value="1200"> 20 Minutes</label>
-                        <label><input type="checkbox" name="vt-interval" value="900"> 15 Minutes</label>
-                        <label><input type="checkbox" name="vt-interval" value="600"> 10 Minutes</label>
-                        <label><input type="checkbox" name="vt-interval" value="300"> 5 Minutes</label>
-                        <label><input type="checkbox" name="vt-interval" value="180"> 3 Minutes</label>
-                        <label><input type="checkbox" name="vt-interval" value="120"> 2 Minutes</label>
-                        <label><input type="checkbox" name="vt-interval" value="90"> 90 Seconds</label>
-                        <label><input type="checkbox" name="vt-interval" value="60"> 60 Seconds</label>
-                        <label><input type="checkbox" name="vt-interval" value="45"> 45 Seconds</label>
-                        <label><input type="checkbox" name="vt-interval" value="30"> 30 Seconds</label>
-                        <label><input type="checkbox" name="vt-interval" value="20"> 20 Seconds</label>
-                        <label><input type="checkbox" name="vt-interval" value="15"> 15 Seconds</label>
-                        <br>
-                        <label>
-                            Countdown from:
-                            <select name="vt-countdown-from-select" class="countdown-from-select">
-                                <option value="">None</option>
-                                <option value="10s">10 Seconds</option>
-                                <option value="5s">5 Seconds</option>
-                            </select>
-                        </label>
-                        <label class="verbalize-10s-option" style="display: none;">
-                            <input type="checkbox" name="vt-verbalize-10s-on-5s"> Verbalize 10s (if 5s selected)
-                        </label>
-                    </div>
-                    <label for="vt-format-string">Verbalization Format (e.g., "VT Out in {time_value} {time_unit}"):</label>
-                    <input type="text" id="vt-format-string" value="{name} out in {time_value} {time_unit}" required><br>
-
-                    <button type="submit">Start VT Countdown</button>
-                </form>
-            </div>
+      <section class="panel">
+        <h2>Source</h2>
+        <div class="mode-tabs">
+          <button class="btn" :class="{ active: profile.connection.mode === 'vmix' }" @click="setMode('vmix')">vMix</button>
+          <button class="btn" :class="{ active: profile.connection.mode === 'qlab' }" @click="setMode('qlab')">QLab</button>
+          <button class="btn" disabled title="Coming later">Timed</button>
         </div>
 
-        <h2>Active Countdowns</h2>
-        <div id="active-countdowns">
-            <!-- Countdowns will be displayed here -->
-            <p id="no-countdowns-message">No active countdowns.</p>
-        </div>
+        <template v-if="profile.connection.mode === 'vmix'">
+          <label class="field">vMix IP
+            <input type="text" v-model="profile.connection.vmix_ip" @change="saveConnection" />
+          </label>
+          <label class="field">Port
+            <input type="number" v-model.number="profile.connection.vmix_port" @change="saveConnection" />
+          </label>
+          <label class="field">Fallback input 1 (title)
+            <input type="text" v-model="profile.connection.vmix_fallback1" @change="saveConnection" placeholder="optional" />
+          </label>
+          <label class="field">Fallback input 2 (title)
+            <input type="text" v-model="profile.connection.vmix_fallback2" @change="saveConnection" placeholder="optional" />
+          </label>
+        </template>
+
+        <template v-else-if="profile.connection.mode === 'qlab'">
+          <label class="field">QLab IP
+            <input type="text" v-model="profile.connection.qlab_ip" @change="saveConnection" />
+          </label>
+          <label class="field">Send port
+            <input type="number" v-model.number="profile.connection.qlab_send_port" @change="saveConnection" />
+          </label>
+          <label class="field">Listen port (OSC replies)
+            <input type="number" v-model.number="profile.connection.qlab_listen_port" @change="saveConnection" />
+          </label>
+          <label class="field">OSC passcode (optional)
+            <input type="text" v-model="profile.connection.qlab_passcode" @change="saveConnection" placeholder="leave blank if using No Passcode" autocomplete="off" />
+          </label>
+          <div class="row-actions">
+            <button class="btn primary" :disabled="qlab.connected || qlab.connecting" @click="connectQlab">
+              {{ qlab.connecting ? 'Connecting…' : 'Connect' }}
+            </button>
+            <button class="btn" :disabled="!qlab.connected || status.armed || qlab.connecting" @click="disconnectQlab">Disconnect</button>
+            <button class="btn" :disabled="!qlab.connected || qlab.connecting" @click="refreshQlab">Refresh cues</button>
+          </div>
+          <p v-if="qlab.message" class="live-meta" style="margin-top:0.75rem">{{ qlab.message }}</p>
+        </template>
+      </section>
     </div>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.min.js"></script>
-    <script src="{{ url_for('static', filename='script.js') }}"></script>
+    <section v-if="profile.connection.mode === 'qlab' && (qlab.connected || qlab.connecting)" class="panel">
+      <h2>QLab cues with duration</h2>
+      <p v-if="qlab.connecting" class="live-meta">Connecting to QLab and loading cues…</p>
+      <template v-else>
+      <p style="color:var(--muted);font-size:0.9rem;margin-top:0">
+        Enable countdown only for the cues you want announced. Running enabled cues drive the live remaining time.
+      </p>
+      <div class="mode-tabs" style="max-width:28rem;margin-bottom:0.35rem">
+        <button
+          type="button"
+          class="btn"
+          :class="{ active: (profile.connection.voice_priority || 'cue') === 'cue' }"
+          @click="setVoicePriority('cue')"
+        >Cue voice first</button>
+        <button
+          type="button"
+          class="btn"
+          :class="{ active: profile.connection.voice_priority === 'schedule' }"
+          @click="setVoicePriority('schedule')"
+        >Schedule voice first</button>
+      </div>
+      <p style="color:var(--muted);font-size:0.85rem;margin:0 0 0.75rem">
+        Priority only matters when both the cue and the schedule row have a specific voice set. If either is Active, the specific choice is used.
+      </p>
+      <div class="row-actions" style="margin-bottom:0.75rem">
+        <button class="btn" @click="enableAllQlabCues">Enable all</button>
+        <button class="btn" @click="disableAllQlabCues">Disable all</button>
+      </div>
+      <div v-if="!qlab.cues.length" class="live-meta">No cues with a duration found in the workspace.</div>
+      <div v-else class="cue-table-wrap">
+        <table class="cue-table">
+          <thead>
+            <tr>
+              <th>Countdown</th>
+              <th>No.</th>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Duration</th>
+              <th>Voice</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="cue in qlab.cues" :key="cue.unique_id" :class="{ running: cue.is_running }">
+              <td>
+                <input
+                  type="checkbox"
+                  :checked="cue.countdown_enabled"
+                  @change="toggleQlabCue(cue, $event.target.checked)"
+                />
+              </td>
+              <td class="mono">{{ cue.number || '—' }}</td>
+              <td>{{ cue.name }}</td>
+              <td>{{ cue.type }}</td>
+              <td class="mono">{{ formatTime(cue.duration) }}</td>
+              <td>
+                <select
+                  class="row-voice-select"
+                  :value="cue.voice_id || ''"
+                  @change="setQlabCueVoice(cue, $event.target.value)"
+                  title="Voice for this cue"
+                >
+                  <option value="">Active ({{ activeVoiceName }})</option>
+                  <option v-for="v in profile.voices" :key="v.id" :value="v.id">{{ v.name }}</option>
+                </select>
+              </td>
+              <td>
+                <span v-if="cue.is_running" class="status-pill ok">Running {{ formatTime(cue.remaining) }}</span>
+                <span v-else class="status-pill">Idle</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      </template>
+    </section>
+
+    <section class="panel">
+      <h2>Audio output</h2>
+      <label class="field">Output device (plays on this computer)
+        <select v-model.number="deviceSelect" @change="saveDevice">
+          <option :value="null">System default</option>
+          <option v-for="d in devices" :key="d.id" :value="d.id">{{ d.name }}{{ d.is_default ? ' (default)' : '' }}</option>
+        </select>
+      </label>
+    </section>
+
+    <section class="panel">
+      <h2>Announcement schedule</h2>
+      <p style="color:var(--muted);font-size:0.9rem;margin-top:0">
+        Drag phrases into rows. Shortest call at the top, longest at the bottom.
+      </p>
+
+      <div class="phrase-bank">
+        <div class="phrase-bank-head">
+          <span class="phrase-bank-title">Phrase bank</span>
+          <button class="btn" type="button" @click="addCustomPhrase">Add custom…</button>
+        </div>
+        <div class="chips bank-chips">
+          <div
+            v-for="phrase in clips.phrase_bank"
+            :key="phrase.id"
+            class="chip bank"
+            :class="{ missing: !isRecorded(phrase.id) }"
+            draggable="true"
+            @dragstart="onBankDragStart(phrase.id)"
+            :title="phrase.recorded ? phrase.prompt : 'Not recorded — drop then record'"
+          >
+            {{ phrase.prompt }}
+            <a
+              v-if="!isRecorded(phrase.id)"
+              class="chip-record"
+              :href="voiceHref(phrase.id)"
+              @click.stop
+              title="Record"
+            >Rec</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="add-row-bar">
+        <label class="field" style="margin:0;flex:1;min-width:140px">
+          Add call at
+          <input type="text" v-model="addRow.value" placeholder="90 · 1:30 · 5" @keydown.enter.prevent="submitAddRow" />
+        </label>
+        <label class="field" style="margin:0;min-width:120px">
+          Unit
+          <select v-model="addRow.unit">
+            <option value="auto">auto / mm:ss</option>
+            <option value="seconds">seconds</option>
+            <option value="minutes">minutes</option>
+            <option value="hours">hours</option>
+          </select>
+        </label>
+        <button class="btn primary" type="button" @click="submitAddRow">Add</button>
+      </div>
+
+      <div
+        v-for="(row, ri) in profile.schedule"
+        :key="row.id"
+        class="schedule-row"
+        :class="{ disabled: !row.enabled, flash: flashRowId === row.id }"
+      >
+        <div class="schedule-row-head">
+          <label style="display:flex;align-items:center;gap:0.5rem;color:var(--text)">
+            <input type="checkbox" v-model="row.enabled" @change="saveSchedule" />
+            <strong>{{ row.label }}</strong>
+            <span style="color:var(--muted);font-size:0.85rem" v-if="row.threshold_seconds != null">@ {{ formatTime(row.threshold_seconds) }}</span>
+            <span style="color:var(--muted);font-size:0.85rem" v-else>sequence</span>
+          </label>
+          <div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap">
+            <select
+              class="row-voice-select"
+              :value="row.voice_id || ''"
+              @change="setRowVoice(row, $event.target.value)"
+              title="Voice for this call"
+            >
+              <option value="">Active ({{ activeVoiceName }})</option>
+              <option v-for="v in profile.voices" :key="v.id" :value="v.id">{{ v.name }}</option>
+            </select>
+            <select
+              v-if="row.row_type === 'sequence'"
+              class="row-voice-select"
+              :value="row.sequence_style || 'continuous'"
+              @change="setSequenceStyle(row, $event.target.value)"
+              title="Roll-down style"
+            >
+              <option value="continuous">Continuous take</option>
+              <option value="separate">Separate callouts</option>
+            </select>
+            <select v-if="row.variants && row.variants.length > 1" v-model="row.active_variant_id" @change="saveSchedule">
+              <option v-for="v in row.variants" :key="v.id" :value="v.id">{{ v.label }}</option>
+            </select>
+            <button
+              v-if="row.row_type !== 'sequence'"
+              class="btn ghost"
+              type="button"
+              title="Delete row"
+              @click="deleteScheduleRow(row.id)"
+            >Delete</button>
+          </div>
+        </div>
+
+        <div v-if="rowMissingCount(row) > 0" class="row-missing">
+          {{ rowMissingCount(row) }} clip(s) missing
+          <a
+            class="btn"
+            :href="row.row_type === 'sequence' && row.sequence_style === 'continuous'
+              ? rolldownHref(row)
+              : voiceHref(firstMissingClip(row), row)"
+          >Record missing</a>
+        </div>
+
+        <template v-if="row.row_type === 'sequence' && row.sequence_style === 'continuous'">
+          <div class="chips">
+            <span
+              class="chip"
+              :class="{ missing: isClipMissing(resolveVoiceId(row), 'countdown_10_to_1') }"
+            >
+              10 to 1 countdown
+              <a
+                v-if="isClipMissing(resolveVoiceId(row), 'countdown_10_to_1')"
+                class="chip-record"
+                :href="rolldownHref(row)"
+                @click.stop
+              >Rec</a>
+            </span>
+          </div>
+        </template>
+        <template v-else-if="row.row_type === 'sequence'">
+          <div class="chips">
+            <span
+              v-for="cid in row.sequence_clip_ids"
+              :key="cid"
+              class="chip"
+              :class="{ missing: isClipMissing(resolveVoiceId(row), cid) }"
+            >
+              {{ cid }}
+              <a
+                v-if="isClipMissing(resolveVoiceId(row), cid)"
+                class="chip-record"
+                :href="voiceHref(cid, row)"
+                @click.stop
+              >Rec</a>
+            </span>
+          </div>
+        </template>
+        <template v-else>
+          <div
+            class="chips drop-target"
+            @dragover.prevent
+            @drop="onDropOnRow($event, ri)"
+          >
+            <div
+              v-for="(slot, si) in activeSlots(row)"
+              :key="slot.clip_id + '-' + si"
+              class="chip"
+              :class="{ off: !slot.enabled, missing: slot.enabled && isClipMissing(resolveVoiceId(row), slot.clip_id) }"
+              draggable="true"
+              @dragstart="onDragStart(ri, si)"
+              @dragover.prevent
+              @drop.stop="onDropSlot($event, ri, si)"
+            >
+              <button class="toggle" type="button" @click="toggleSlot(ri, si)" title="Toggle">{{ slot.enabled ? '●' : '○' }}</button>
+              {{ labelForClip(slot.clip_id) }}
+              <a
+                v-if="slot.enabled && isClipMissing(resolveVoiceId(row), slot.clip_id)"
+                class="chip-record"
+                :href="voiceHref(slot.clip_id, row)"
+                @click.stop
+                title="Record"
+              >Rec</a>
+              <button class="toggle" type="button" title="Remove" @click.stop="removeSlot(ri, si)">×</button>
+            </div>
+            <span v-if="!activeSlots(row).length" class="drop-hint">Drop phrases here</span>
+          </div>
+        </template>
+      </div>
+      <div class="row-actions">
+        <button class="btn" @click="resetSchedule">Reset schedule to default</button>
+      </div>
+    </section>
+
+    <div v-if="toast" class="toast" @click="toast = null">{{ toast }}</div>
+
+    <div v-if="pipsOpen" class="modal-backdrop" @click.self="closePips">
+      <div class="modal-panel pips-modal" role="dialog" aria-label="Pips">
+        <div class="modal-head">
+          <h2>Pips</h2>
+          <button class="btn ghost" type="button" @click="closePips">Close</button>
+        </div>
+        <p class="wizard-context" style="margin-top:0">
+          Greenwich-style time signal on the selected output. Plays alongside a speaking countdown if both fire together.
+        </p>
+        <p class="pips-next" v-if="pipsNextLabel">
+          Next: {{ pipsNextLabel }}
+          <span v-if="pipsDraft.next_leap_kind === 'positive'"> (+leap)</span>
+          <span v-else-if="pipsDraft.next_leap_kind === 'negative'"> (−leap)</span>
+        </p>
+        <p class="pips-next" v-else style="color:var(--muted)">No upcoming pips (enable &amp; configure below)</p>
+
+        <label class="switch-row">
+          <span>Enable pips</span>
+          <input type="checkbox" class="switch" v-model="pipsDraft.enabled" />
+        </label>
+
+        <h3 class="modal-sub">Quarter-hour marks</h3>
+        <div class="switch-grid">
+          <label class="switch-row compact">
+            <span>On the hour</span>
+            <input type="checkbox" class="switch" v-model="pipsDraft.on_hour" />
+          </label>
+          <label class="switch-row compact">
+            <span>:15 past</span>
+            <input type="checkbox" class="switch" v-model="pipsDraft.on_quarter_past" />
+          </label>
+          <label class="switch-row compact">
+            <span>Half past</span>
+            <input type="checkbox" class="switch" v-model="pipsDraft.on_half" />
+          </label>
+          <label class="switch-row compact">
+            <span>Quarter to (:45)</span>
+            <input type="checkbox" class="switch" v-model="pipsDraft.on_quarter_to" />
+          </label>
+        </div>
+
+        <h3 class="modal-sub">Days of week</h3>
+        <div class="day-toggles">
+          <button
+            v-for="(name, i) in dayNames"
+            :key="name"
+            type="button"
+            class="day-toggle"
+            :class="{ on: pipsDraft.days.includes(i) }"
+            :aria-pressed="pipsDraft.days.includes(i)"
+            @click="togglePipDay(i)"
+          >{{ name }}</button>
+        </div>
+
+        <h3 class="modal-sub">Active periods</h3>
+        <label class="switch-row">
+          <span>Only within these windows</span>
+          <input type="checkbox" class="switch" v-model="pipsDraft.use_periods" />
+        </label>
+        <div v-for="(period, pi) in pipsDraft.periods" :key="period.id" class="period-row">
+          <input type="time" v-model="period.start" />
+          <span>to</span>
+          <input type="time" v-model="period.end" />
+          <button class="btn ghost" type="button" @click="pipsDraft.periods.splice(pi, 1)">Remove</button>
+        </div>
+        <button class="btn" type="button" @click="addPipPeriod">Add period</button>
+
+        <h3 class="modal-sub">Specific times</h3>
+        <p class="wizard-context" style="margin:0 0 0.5rem;font-size:0.85rem">
+          Independent of marks, days, and periods — each has its own on/off.
+        </p>
+        <div v-for="(st, si) in pipsDraft.specific_times" :key="st.id" class="period-row">
+          <input type="checkbox" class="switch" v-model="st.enabled" title="Enabled" />
+          <input type="time" v-model="st.time" />
+          <input type="text" v-model="st.label" placeholder="Label (optional)" style="flex:1" />
+          <button class="btn ghost" type="button" @click="pipsDraft.specific_times.splice(si, 1)">Remove</button>
+        </div>
+        <button class="btn" type="button" @click="addPipSpecific">Add time</button>
+
+        <h3 class="modal-sub">Leap seconds</h3>
+        <label class="switch-row">
+          <span>Honour leap seconds (+ and −)</span>
+          <input type="checkbox" class="switch" v-model="pipsDraft.leap_seconds_enabled" />
+        </label>
+        <label class="switch-row">
+          <span>Auto-update leap table from IERS</span>
+          <input type="checkbox" class="switch" v-model="pipsDraft.leap_seconds_auto_update" />
+        </label>
+        <label class="switch-row">
+          <span>Simulate +leap at next UTC midnight</span>
+          <input type="checkbox" class="switch" v-model="pipsDraft.simulate_leap_next_utc_midnight" />
+        </label>
+        <div class="row-actions" style="margin-top:0.75rem">
+          <button class="btn" type="button" @click="refreshLeapTable">Refresh leap table</button>
+          <button class="btn" type="button" @click="testPipsNow">Test pips now</button>
+        </div>
+
+        <div class="row-actions" style="margin-top:1.25rem;justify-content:flex-end">
+          <button class="btn ghost" type="button" @click="closePips">Cancel</button>
+          <button class="btn primary" type="button" @click="savePips">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { api, formatTime } from "/assets/js/api.js";
+
+    const { createApp, reactive, ref, onMounted, computed } = Vue;
+
+    createApp({
+      setup() {
+        const profile = reactive({
+          connection: {
+            mode: "vmix",
+            vmix_ip: "127.0.0.1",
+            vmix_port: 8088,
+            vmix_fallback1: "",
+            vmix_fallback2: "",
+            qlab_ip: "127.0.0.1",
+            qlab_send_port: 53000,
+            qlab_listen_port: 53001,
+            qlab_passcode: "",
+            qlab_cues_initialized: false,
+            qlab_enabled_cue_ids: [],
+            qlab_cue_settings: {},
+            voice_priority: "cue",
+          },
+          schedule: [],
+          custom_phrases: [],
+          voices: [],
+          active_voice_id: "default",
+          output_device_id: null,
+          output_device_name: null,
+        });
+        const status = reactive({
+          armed: false,
+          remaining_seconds: null,
+          label: null,
+          connected: false,
+          message: "",
+          playing: false,
+        });
+        const qlab = reactive({
+          connected: false,
+          connecting: false,
+          message: "",
+          cues: [],
+          cue_count: 0,
+        });
+        const clips = reactive({
+          lexicon: [],
+          phrase_bank: [],
+          missing: [],
+          complete: false,
+          total: 0,
+          recorded_count: 0,
+          recorded_ids: [],
+        });
+        const devices = ref([]);
+        const deviceSelect = ref(null);
+        const toast = ref(null);
+        const flashRowId = ref(null);
+        const addRow = reactive({ value: "", unit: "auto" });
+        const drag = reactive({ row: null, slot: null, bankClipId: null });
+        const pipsOpen = ref(false);
+        const pipsDraft = reactive({
+          enabled: false,
+          on_hour: true,
+          on_quarter_past: false,
+          on_half: false,
+          on_quarter_to: false,
+          days: [0, 1, 2, 3, 4, 5, 6],
+          use_periods: false,
+          periods: [],
+          specific_times: [],
+          leap_seconds_enabled: true,
+          leap_seconds_auto_update: true,
+          simulate_leap_next_utc_midnight: false,
+          next_leap_kind: "none",
+        });
+        const pipsNextLabel = ref("");
+        const dayNames = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+        const recordedSet = computed(() => new Set(clips.recorded_ids || []));
+        const missingSet = computed(() => new Set(clips.missing || []));
+
+        const activeVoiceName = computed(() => {
+          const v = (profile.voices || []).find((x) => x.id === profile.active_voice_id);
+          return v ? v.name : "Default";
+        });
+
+        const linkLabel = computed(() => {
+          if (status.connected) return "Connected";
+          if (status.armed) return "No link";
+          return "Idle";
+        });
+        const linkPillClass = computed(() => {
+          if (status.connected) return "ok";
+          if (status.armed) return "bad";
+          return "";
+        });
+
+        function showToast(msg) {
+          toast.value = msg;
+          setTimeout(() => { if (toast.value === msg) toast.value = null; }, 4500);
+        }
+
+        function isRecorded(id) {
+          return recordedSet.value.has(id);
+        }
+
+        function resolveVoiceId(row) {
+          if (row?.voice_id && (profile.voices || []).some((v) => v.id === row.voice_id)) {
+            return row.voice_id;
+          }
+          return profile.active_voice_id || "default";
+        }
+
+        function isClipMissing(voiceId, clipId) {
+          return missingSet.value.has(`${voiceId}/${clipId}`);
+        }
+
+        function voiceHref(clipId, row = null) {
+          const voice = row ? resolveVoiceId(row) : (profile.active_voice_id || "default");
+          return `/voice?mode=pack&voice=${encodeURIComponent(voice)}&clip=${encodeURIComponent(clipId)}`;
+        }
+
+        function rolldownHref(row = null) {
+          const voice = row ? resolveVoiceId(row) : (profile.active_voice_id || "default");
+          return `/voice?mode=rolldown&voice=${encodeURIComponent(voice)}`;
+        }
+
+        function setRowVoice(row, value) {
+          row.voice_id = value || null;
+          saveSchedule();
+        }
+
+        function setSequenceStyle(row, value) {
+          row.sequence_style = value === "separate" ? "separate" : "continuous";
+          if (row.sequence_style === "continuous") {
+            row.sequence_clip_ids = ["countdown_10_to_1"];
+            row.threshold_seconds = 10;
+          } else {
+            row.sequence_clip_ids = ["10", "9", "8", "7", "6", "5", "4", "3", "2", "1"];
+            row.threshold_seconds = 10;
+          }
+          saveSchedule();
+        }
+
+        function activeSlots(row) {
+          if (!row.variants?.length) return [];
+          const v = row.variants.find((x) => x.id === row.active_variant_id) || row.variants[0];
+          return v?.slots || [];
+        }
+
+        function labelForClip(id) {
+          const hit = (clips.lexicon || []).find((c) => c.id === id)
+            || (clips.phrase_bank || []).find((c) => c.id === id);
+          if (hit) return hit.prompt;
+          return String(id).split("_").join(" ");
+        }
+
+        function rowClipIds(row) {
+          if (row.row_type === "sequence") {
+            if (row.sequence_style === "continuous") return ["countdown_10_to_1"];
+            return row.sequence_clip_ids || [];
+          }
+          return activeSlots(row).filter((s) => s.enabled).map((s) => s.clip_id);
+        }
+
+        function rowMissingCount(row) {
+          if (!row.enabled) return 0;
+          const voice = resolveVoiceId(row);
+          return rowClipIds(row).filter((id) => isClipMissing(voice, id)).length;
+        }
+
+        function firstMissingClip(row) {
+          const voice = resolveVoiceId(row);
+          return rowClipIds(row).find((id) => isClipMissing(voice, id)) || "";
+        }
+
+        async function refreshClips() {
+          Object.assign(clips, await api("/api/clips"));
+        }
+
+        async function loadAll() {
+          const [p, c, d, s, q] = await Promise.all([
+            api("/api/profile"),
+            api("/api/clips"),
+            api("/api/devices"),
+            api("/api/status"),
+            api("/api/qlab/status"),
+          ]);
+          Object.assign(profile, p);
+          if (!profile.custom_phrases) profile.custom_phrases = [];
+          if (!profile.voices) profile.voices = [];
+          if (!profile.active_voice_id) profile.active_voice_id = "default";
+          if (!profile.connection.qlab_cue_settings) profile.connection.qlab_cue_settings = {};
+          if (!profile.connection.voice_priority) profile.connection.voice_priority = "cue";
+          Object.assign(clips, c);
+          devices.value = d;
+          deviceSelect.value = p.output_device_id;
+          Object.assign(status, s);
+          Object.assign(qlab, q);
+        }
+
+        function applyQlabPayload(payload) {
+          if (!payload) return;
+          qlab.connected = !!payload.connected;
+          qlab.message = payload.message || "";
+          qlab.cues = payload.cues || [];
+          qlab.cue_count = payload.cue_count || qlab.cues.length;
+          if (payload.connected && Array.isArray(payload.cues)) {
+            profile.connection.qlab_enabled_cue_ids = payload.cues
+              .filter((c) => c.countdown_enabled)
+              .map((c) => c.unique_id);
+          }
+        }
+
+        async function saveConnection(options = {}) {
+          await api("/api/profile/connection", { method: "PUT", json: { connection: profile.connection } });
+          if (!options.silent) showToast("Connection saved");
+        }
+
+        async function connectQlab() {
+          qlab.connecting = true;
+          qlab.message = "Connecting…";
+          try {
+            await saveConnection({ silent: true });
+            const r = await api("/api/qlab/connect", { method: "POST" });
+            applyQlabPayload(r);
+            showToast(r.success ? "Connected to QLab" : (r.message || "Connect failed"));
+          } catch (e) {
+            qlab.connected = false;
+            qlab.message = String(e.message || e);
+            showToast(qlab.message);
+          } finally {
+            qlab.connecting = false;
+          }
+        }
+
+        async function disconnectQlab() {
+          const r = await api("/api/qlab/disconnect", { method: "POST" });
+          applyQlabPayload({ ...r, cues: [] });
+          showToast("Disconnected from QLab");
+        }
+
+        async function refreshQlab() {
+          const r = await api("/api/qlab/refresh", { method: "POST" });
+          applyQlabPayload(r);
+          showToast(r.message || "Cues refreshed");
+        }
+
+        async function saveQlabEnabled(ids) {
+          const r = await api("/api/qlab/enabled", {
+            method: "PUT",
+            json: { enabled_cue_ids: ids },
+          });
+          applyQlabPayload(r);
+          profile.connection.qlab_enabled_cue_ids = ids;
+          profile.connection.qlab_cues_initialized = true;
+        }
+
+        async function toggleQlabCue(cue, enabled) {
+          const set = new Set(profile.connection.qlab_enabled_cue_ids || []);
+          if (enabled) set.add(cue.unique_id);
+          else set.delete(cue.unique_id);
+          await saveQlabEnabled([...set]);
+        }
+
+        async function enableAllQlabCues() {
+          await saveQlabEnabled(qlab.cues.map((c) => c.unique_id));
+        }
+
+        async function disableAllQlabCues() {
+          await saveQlabEnabled([]);
+        }
+
+        async function setVoicePriority(priority) {
+          profile.connection.voice_priority = priority === "schedule" ? "schedule" : "cue";
+          await saveConnection({ silent: true });
+        }
+
+        async function setQlabCueVoice(cue, value) {
+          const uid = cue.unique_id;
+          if (!uid) return;
+          if (!profile.connection.qlab_cue_settings) {
+            profile.connection.qlab_cue_settings = {};
+          }
+          const voiceId = value || null;
+          cue.voice_id = voiceId;
+          if (voiceId) {
+            profile.connection.qlab_cue_settings[uid] = { voice_id: voiceId };
+          } else {
+            delete profile.connection.qlab_cue_settings[uid];
+          }
+          await saveConnection({ silent: true });
+        }
+
+        async function saveSchedule() {
+          const p = await api("/api/profile/schedule", { method: "PUT", json: { schedule: profile.schedule } });
+          profile.schedule = p.schedule;
+          await refreshClips();
+        }
+
+        async function submitAddRow() {
+          try {
+            const p = await api("/api/profile/schedule/add", {
+              method: "POST",
+              json: { value: addRow.value, unit: addRow.unit },
+            });
+            Object.assign(profile, p);
+            addRow.value = "";
+            await refreshClips();
+            showToast("Call added");
+          } catch (e) {
+            showToast(String(e.message || e));
+          }
+        }
+
+        async function deleteScheduleRow(rowId) {
+          try {
+            const p = await api(`/api/profile/schedule/${encodeURIComponent(rowId)}`, { method: "DELETE" });
+            Object.assign(profile, p);
+            await refreshClips();
+          } catch (e) {
+            showToast(String(e.message || e));
+          }
+        }
+
+        async function addCustomPhrase() {
+          const prompt = window.prompt("Custom phrase text (what they should say):");
+          if (!prompt || !prompt.trim()) return;
+          try {
+            const r = await api("/api/profile/custom-phrases", {
+              method: "POST",
+              json: { prompt: prompt.trim() },
+            });
+            Object.assign(profile, r.profile);
+            await refreshClips();
+            showToast(`Added “${prompt.trim()}” — record it next`);
+            window.location.href = `/voice?mode=pack&voice=${encodeURIComponent(profile.active_voice_id || "default")}&clip=${encodeURIComponent(r.phrase.id)}`;
+          } catch (e) {
+            showToast(String(e.message || e));
+          }
+        }
+
+        async function saveDevice() {
+          const d = devices.value.find((x) => x.id === deviceSelect.value);
+          await api("/api/profile/device", {
+            method: "PUT",
+            json: {
+              output_device_id: deviceSelect.value,
+              output_device_name: d ? d.name : null,
+            },
+          });
+          profile.output_device_id = deviceSelect.value;
+          showToast("Output device saved");
+        }
+
+        async function setMode(mode) {
+          if (profile.connection.mode === "qlab" && mode !== "qlab" && qlab.connected) {
+            try { await disconnectQlab(); } catch (_) { /* ignore */ }
+          }
+          profile.connection.mode = mode;
+          await saveConnection();
+        }
+
+        async function testConnection() {
+          try {
+            const r = await api("/api/test-connection", {
+              method: "POST",
+              json: { connection: profile.connection },
+            });
+            if (r.qlab) applyQlabPayload(r.qlab);
+            showToast(r.connected ? `OK: ${r.message}` : `Failed: ${r.message}`);
+          } catch (e) {
+            showToast(String(e.message || e));
+          }
+        }
+
+        async function arm() {
+          const r = await api("/api/arm", { method: "POST" });
+          if (!r.success) {
+            showToast(r.message + (r.missing ? `: ${r.missing.join(", ")}` : ""));
+            return;
+          }
+          showToast("Armed");
+          Object.assign(status, await api("/api/status"));
+        }
+
+        async function disarm() {
+          await api("/api/disarm", { method: "POST" });
+          showToast("Disarmed");
+          Object.assign(status, await api("/api/status"));
+        }
+
+        function openDisplay() {
+          window.open("/display", "vt-display", "noopener,noreferrer");
+        }
+
+        async function exportPack() {
+          const blob = await api("/api/export");
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = "vt-countdown-pack.zip";
+          a.click();
+          URL.revokeObjectURL(url);
+        }
+
+        async function importPack(ev) {
+          const file = ev.target.files?.[0];
+          if (!file) return;
+          const fd = new FormData();
+          fd.append("file", file);
+          const res = await fetch("/api/import?replace=true", { method: "POST", body: fd });
+          const data = await res.json();
+          if (!res.ok) {
+            showToast(data.detail || "Import failed");
+            return;
+          }
+          await loadAll();
+          showToast("Imported pack");
+          ev.target.value = "";
+        }
+
+        async function resetSchedule() {
+          const p = await api("/api/profile/reset-schedule", { method: "POST" });
+          Object.assign(profile, p);
+          await refreshClips();
+          showToast("Schedule reset");
+        }
+
+        function toggleSlot(ri, si) {
+          const row = profile.schedule[ri];
+          const slots = activeSlots(row);
+          slots[si].enabled = !slots[si].enabled;
+          saveSchedule();
+        }
+
+        function removeSlot(ri, si) {
+          const row = profile.schedule[ri];
+          const variant = row.variants.find((v) => v.id === row.active_variant_id) || row.variants[0];
+          if (!variant) return;
+          variant.slots.splice(si, 1);
+          saveSchedule();
+        }
+
+        function onBankDragStart(clipId) {
+          drag.bankClipId = clipId;
+          drag.row = null;
+          drag.slot = null;
+        }
+
+        function onDragStart(ri, si) {
+          drag.row = ri;
+          drag.slot = si;
+          drag.bankClipId = null;
+        }
+
+        function onDropSlot(ev, ri, si) {
+          ev.preventDefault();
+          if (drag.bankClipId) {
+            appendBankClip(ri, drag.bankClipId, si);
+            return;
+          }
+          if (drag.row !== ri || drag.slot == null) return;
+          const row = profile.schedule[ri];
+          const variant = row.variants.find((v) => v.id === row.active_variant_id) || row.variants[0];
+          const slots = variant.slots;
+          const from = drag.slot;
+          const to = si;
+          if (from === to) return;
+          const [item] = slots.splice(from, 1);
+          slots.splice(to, 0, item);
+          drag.row = null;
+          drag.slot = null;
+          saveSchedule();
+        }
+
+        function onDropOnRow(ev, ri) {
+          ev.preventDefault();
+          if (drag.bankClipId) {
+            appendBankClip(ri, drag.bankClipId);
+            return;
+          }
+          drag.row = null;
+          drag.slot = null;
+        }
+
+        function appendBankClip(ri, clipId, atIndex = null) {
+          const row = profile.schedule[ri];
+          if (row.row_type === "sequence") {
+            drag.bankClipId = null;
+            return;
+          }
+          let variant = row.variants.find((v) => v.id === row.active_variant_id) || row.variants[0];
+          if (!variant) {
+            variant = { id: "default", label: "Default", slots: [] };
+            row.variants = [variant];
+            row.active_variant_id = "default";
+          }
+          const slot = { clip_id: clipId, enabled: true };
+          if (atIndex == null || atIndex < 0 || atIndex > variant.slots.length) {
+            variant.slots.push(slot);
+          } else {
+            variant.slots.splice(atIndex, 0, slot);
+          }
+          drag.bankClipId = null;
+          drag.row = null;
+          drag.slot = null;
+          saveSchedule();
+        }
+
+        function flashRow(threshold) {
+          const t = Number(threshold);
+          let row = profile.schedule.find(
+            (r) => r.row_type === "threshold" && Math.abs(Number(r.threshold_seconds) - t) < 0.01
+          );
+          if (!row && (t <= 10 || Math.abs(t - 10) < 0.01)) {
+            row = profile.schedule.find((r) => r.row_type === "sequence");
+          }
+          if (!row) return;
+          flashRowId.value = row.id;
+          setTimeout(() => {
+            if (flashRowId.value === row.id) flashRowId.value = null;
+          }, 1100);
+        }
+
+        function applyPipsPayload(data) {
+          if (!data?.pips) return;
+          const p = data.pips;
+          Object.assign(pipsDraft, {
+            enabled: !!p.enabled,
+            on_hour: !!p.on_hour,
+            on_quarter_past: !!p.on_quarter_past,
+            on_half: !!p.on_half,
+            on_quarter_to: !!p.on_quarter_to,
+            days: Array.isArray(p.days) ? [...p.days] : [0, 1, 2, 3, 4, 5, 6],
+            use_periods: !!p.use_periods,
+            periods: (p.periods || []).map((x) => ({ ...x })),
+            specific_times: (p.specific_times || []).map((x) => ({ ...x })),
+            leap_seconds_enabled: p.leap_seconds_enabled !== false,
+            leap_seconds_auto_update: p.leap_seconds_auto_update !== false,
+            simulate_leap_next_utc_midnight: !!p.simulate_leap_next_utc_midnight,
+            next_leap_kind: data.next_leap_kind || "none",
+          });
+          pipsNextLabel.value = data.next?.label || "";
+        }
+
+        async function openPips() {
+          try {
+            const data = await api("/api/profile/pips");
+            applyPipsPayload(data);
+            pipsOpen.value = true;
+          } catch (e) {
+            showToast(String(e.message || e));
+          }
+        }
+
+        function closePips() {
+          pipsOpen.value = false;
+        }
+
+        function togglePipDay(i) {
+          const set = new Set(pipsDraft.days);
+          if (set.has(i)) set.delete(i);
+          else set.add(i);
+          pipsDraft.days = [...set].sort((a, b) => a - b);
+        }
+
+        function addPipPeriod() {
+          pipsDraft.periods.push({
+            id: `p${Date.now()}`,
+            start: "09:00",
+            end: "17:00",
+          });
+        }
+
+        function addPipSpecific() {
+          pipsDraft.specific_times.push({
+            id: `s${Date.now()}`,
+            time: "12:00",
+            enabled: true,
+            label: "",
+          });
+        }
+
+        async function savePips() {
+          try {
+            const body = {
+              enabled: pipsDraft.enabled,
+              on_hour: pipsDraft.on_hour,
+              on_quarter_past: pipsDraft.on_quarter_past,
+              on_half: pipsDraft.on_half,
+              on_quarter_to: pipsDraft.on_quarter_to,
+              days: pipsDraft.days,
+              use_periods: pipsDraft.use_periods,
+              periods: pipsDraft.periods,
+              specific_times: pipsDraft.specific_times,
+              leap_seconds_enabled: pipsDraft.leap_seconds_enabled,
+              leap_seconds_auto_update: pipsDraft.leap_seconds_auto_update,
+              simulate_leap_next_utc_midnight: pipsDraft.simulate_leap_next_utc_midnight,
+            };
+            const data = await api("/api/profile/pips", { method: "PUT", json: body });
+            applyPipsPayload(data);
+            showToast("Pips saved");
+            pipsOpen.value = false;
+          } catch (e) {
+            showToast(String(e.message || e));
+          }
+        }
+
+        async function refreshLeapTable() {
+          try {
+            const data = await api("/api/profile/pips/leap-seconds/refresh", { method: "POST" });
+            applyPipsPayload(data);
+            showToast(data.message || "Leap table refreshed");
+          } catch (e) {
+            showToast(String(e.message || e));
+          }
+        }
+
+        async function testPipsNow() {
+          try {
+            await api("/api/profile/pips/test", { method: "POST" });
+            showToast("Playing pips…");
+          } catch (e) {
+            showToast(String(e.message || e));
+          }
+        }
+
+        function onGlobalKeydown(ev) {
+          if (ev.key === "Escape" && pipsOpen.value) {
+            ev.preventDefault();
+            closePips();
+            return;
+          }
+          if (!(ev.metaKey || ev.ctrlKey)) return;
+          if (ev.key !== "p" && ev.key !== "P") return;
+          ev.preventDefault();
+          if (pipsOpen.value) closePips();
+          else openPips();
+        }
+
+        onMounted(async () => {
+          await loadAll();
+          window.addEventListener("keydown", onGlobalKeydown);
+          const socket = io();
+          socket.on("countdown_tick", (data) => Object.assign(status, data));
+          socket.on("engine_status", (data) => Object.assign(status, data));
+          socket.on("qlab_status", (data) => applyQlabPayload(data));
+          socket.on("announcement", (data) => {
+            if (data && data.threshold != null) flashRow(data.threshold);
+          });
+          socket.on("countdown_reset", () => showToast("Countdown reset — waiting for next VT"));
+          if (!clips.complete) {
+            showToast("Record a voice pack before arming");
+          }
+        });
+
+        return {
+          profile,
+          status,
+          qlab,
+          clips,
+          devices,
+          deviceSelect,
+          toast,
+          flashRowId,
+          addRow,
+          pipsOpen,
+          pipsDraft,
+          pipsNextLabel,
+          dayNames,
+          linkLabel,
+          linkPillClass,
+          formatTime,
+          isRecorded,
+          activeVoiceName,
+          resolveVoiceId,
+          isClipMissing,
+          voiceHref,
+          rolldownHref,
+          setRowVoice,
+          setSequenceStyle,
+          activeSlots,
+          labelForClip,
+          rowMissingCount,
+          firstMissingClip,
+          saveConnection,
+          saveSchedule,
+          saveDevice,
+          setMode,
+          testConnection,
+          connectQlab,
+          disconnectQlab,
+          refreshQlab,
+          toggleQlabCue,
+          enableAllQlabCues,
+          disableAllQlabCues,
+          setVoicePriority,
+          setQlabCueVoice,
+          arm,
+          disarm,
+          openDisplay,
+          exportPack,
+          importPack,
+          resetSchedule,
+          submitAddRow,
+          deleteScheduleRow,
+          addCustomPhrase,
+          toggleSlot,
+          removeSlot,
+          onBankDragStart,
+          onDragStart,
+          onDropSlot,
+          onDropOnRow,
+          closePips,
+          togglePipDay,
+          addPipPeriod,
+          addPipSpecific,
+          savePips,
+          refreshLeapTable,
+          testPipsNow,
+        };
+      },
+    }).mount("#app");
+  </script>
 </body>
 </html>

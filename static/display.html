@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Countdown Display</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/assets/css/app.css" />
+  <script src="https://cdn.jsdelivr.net/npm/vue@3.5.13/dist/vue.global.prod.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.5/dist/socket.io.min.js"></script>
+</head>
+<body>
+  <div id="app" class="display-page">
+    <div>
+      <div class="clock">{{ formatTime(status.remaining_seconds) }}</div>
+      <div class="label">{{ status.label || 'No media' }}</div>
+      <div class="badge">
+        <span :class="['status-pill', status.armed ? 'ok' : '']">{{ status.armed ? 'ARMED' : 'STANDBY' }}</span>
+        <span :class="['status-pill', status.connected ? 'ok' : 'bad']">{{ status.connected ? 'LIVE' : 'NO LINK' }}</span>
+      </div>
+      <div class="label" style="font-size:0.95rem;margin-top:1rem">{{ status.message }}</div>
+    </div>
+  </div>
+  <script type="module">
+    import { formatTime } from "/assets/js/api.js";
+    const { createApp, reactive, onMounted } = Vue;
+    createApp({
+      setup() {
+        const status = reactive({
+          armed: false,
+          remaining_seconds: null,
+          label: null,
+          connected: false,
+          message: "",
+        });
+        onMounted(() => {
+          const socket = io();
+          socket.on("countdown_tick", (data) => Object.assign(status, data));
+          socket.on("engine_status", (data) => Object.assign(status, data));
+          fetch("/api/status").then((r) => r.json()).then((d) => Object.assign(status, d));
+        });
+        return { status, formatTime };
+      },
+    }).mount("#app");
+  </script>
+</body>
+</html>
