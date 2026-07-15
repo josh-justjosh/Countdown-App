@@ -86,6 +86,7 @@ class QLabSource(MediaSource):
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._bind_ok = False
+        self._peer_connected = False
         self._catalog: list[dict] = []
         self._session_ok = False
         self._start()
@@ -98,22 +99,46 @@ class QLabSource(MediaSource):
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((self.listen_ip, self.listen_port))
+            # Connect the datagram socket to QLab so the OS (esp. Windows Firewall)
+            # associates inbound UDP replies with this outbound peer. Without this,
+            # ping can succeed while OSC replies are silently dropped.
+            try:
+                sock.connect((self.ip, self.send_port))
+                self._peer_connected = True
+            except OSError as exc:
+                logger.warning(
+                    "Could not connect UDP peer %s:%s (%s); falling back to sendto",
+                    self.ip,
+                    self.send_port,
+                    exc,
+                )
+                self._peer_connected = False
             sock.settimeout(0.2)
             self._sock = sock
             self._bind_ok = True
             self._thread = threading.Thread(target=self._recv_loop, daemon=True)
             self._thread.start()
-            logger.info("QLab OSC socket bound on %s:%s", self.listen_ip, self.listen_port)
+            logger.info(
+                "QLab OSC socket bound on %s:%s → %s:%s",
+                self.listen_ip,
+                self.listen_port,
+                self.ip,
+                self.send_port,
+            )
         except OSError as exc:
             logger.error("Failed to bind QLab listen port %s: %s", self.listen_port, exc)
             self._sock = None
             self._bind_ok = False
+            self._peer_connected = False
 
     def _recv_loop(self) -> None:
         assert self._sock is not None
         while not self._stop.is_set():
             try:
-                data, _addr = self._sock.recvfrom(65535)
+                if self._peer_connected:
+                    data = self._sock.recv(65535)
+                else:
+                    data, _addr = self._sock.recvfrom(65535)
             except socket.timeout:
                 continue
             except OSError:
@@ -206,8 +231,12 @@ class QLabSource(MediaSource):
         builder = OscMessageBuilder(address=address)
         for arg in args:
             builder.add_arg(arg)
+        packet = builder.build().dgram
         try:
-            self._sock.sendto(builder.build().dgram, (self.ip, self.send_port))
+            if self._peer_connected:
+                self._sock.send(packet)
+            else:
+                self._sock.sendto(packet, (self.ip, self.send_port))
         except OSError as exc:
             logger.debug("OSC send failed: %s", exc)
 
@@ -293,7 +322,10 @@ class QLabSource(MediaSource):
         if version is None and last_error is None and not ws_list:
             return False, (
                 f"No OSC reply from {self.ip}:{self.send_port}. "
-                "Check IP, that QLab is open, and UDP 53000 is reachable."
+                "QLab uses UDP (ping is ICMP and can succeed while OSC fails). "
+                "On Windows, allow VT Vocal Countdown through Defender Firewall "
+                "for Private networks, or add an inbound rule for UDP port "
+                f"{self.listen_port} (replies) and outbound UDP {self.send_port}."
             )
 
         self._session_ok = True

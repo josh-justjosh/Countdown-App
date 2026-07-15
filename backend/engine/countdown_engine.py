@@ -15,7 +15,13 @@ from backend.engine.announcement import (
 from backend.engine.player import AudioPlayer
 from backend.models import Profile, resolve_announcement_voice_id
 from backend.qlab_bridge import BridgeMediaSource, QLabBridge
-from backend.settings import POLL_INTERVAL_SECONDS, THRESHOLD_WINDOW_SECONDS, VOICES_DIR
+from backend.settings import (
+    MEDIA_HOLDOVER_SECONDS,
+    MEDIA_RESYNC_TOLERANCE_SECONDS,
+    POLL_INTERVAL_SECONDS,
+    THRESHOLD_WINDOW_SECONDS,
+    VOICES_DIR,
+)
 from backend.sources.base import MediaSource, RemainingTime
 from backend.sources.vmix import VmixSource
 
@@ -49,6 +55,12 @@ class CountdownEngine:
         self._current_cue_id: str | None = None
         self._lock = threading.Lock()
         self._owns_source = False
+        self._coasting = False
+        self._last_good_seconds: float | None = None
+        self._last_good_at: float | None = None
+        self._last_good_label: str | None = None
+        self._last_good_cue_id: str | None = None
+        self._media_missing_since: float | None = None
 
     @property
     def armed(self) -> bool:
@@ -61,9 +73,50 @@ class CountdownEngine:
             "remaining_seconds": last.seconds if last else None,
             "label": last.label if last else None,
             "connected": last.connected if last else False,
+            "coasting": self._coasting,
             "message": last.message if last else "",
             "playing": self.player.is_playing,
         }
+
+    def _clear_holdover_state(self) -> None:
+        self._coasting = False
+        self._last_good_seconds = None
+        self._last_good_at = None
+        self._last_good_label = None
+        self._last_good_cue_id = None
+        self._media_missing_since = None
+
+    def _reset_media_session(self, reason: str) -> None:
+        self._fired.clear()
+        self._had_media = False
+        self._current_cue_id = None
+        self._clear_holdover_state()
+        self.emit("countdown_reset", {"reason": reason})
+
+    def _mark_thresholds_already_passed(self, seconds: float) -> None:
+        self._fired.clear()
+        for threshold, row_id in threshold_rows(
+            self._profile.schedule if self._profile else []
+        ):
+            if seconds < threshold - THRESHOLD_WINDOW_SECONDS:
+                self._fired.add(f"row:{row_id}")
+        continuous = continuous_sequence_fire(
+            self._profile.schedule if self._profile else []
+        )
+        if continuous:
+            start, _clips, row_id = continuous
+            if seconds < start - THRESHOLD_WINDOW_SECONDS:
+                self._fired.add(f"row:{row_id}")
+        for seq_sec, clip_id in sequence_thresholds(
+            self._profile.schedule if self._profile else []
+        ):
+            if seconds < seq_sec - THRESHOLD_WINDOW_SECONDS:
+                self._fired.add(f"seq:{clip_id}")
+
+    def _extrapolated_remaining(self, now: float) -> float | None:
+        if self._last_good_seconds is None or self._last_good_at is None:
+            return None
+        return max(0.0, self._last_good_seconds - (now - self._last_good_at))
 
     def arm(self, profile: Profile) -> dict[str, Any]:
         if self._armed:
@@ -82,6 +135,7 @@ class CountdownEngine:
         self._profile = profile
         self._fired.clear()
         self._had_media = False
+        self._clear_holdover_state()
         self._stop.clear()
         self._armed = True
         self.player.set_device(profile.output_device_id)
@@ -104,6 +158,7 @@ class CountdownEngine:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=2)
         self._thread = None
+        self._clear_holdover_state()
         self.emit("engine_status", self.status())
         return {"success": True, "message": "Disarmed"}
 
@@ -260,55 +315,106 @@ class CountdownEngine:
     def _loop(self) -> None:
         prev_seconds: float | None = None
         while not self._stop.is_set() and self._source:
+            now = time.time()
             try:
                 result = self._source.get_remaining()
             except Exception as exc:
                 logger.error("Poll error: %s", exc)
                 result = RemainingTime(None, None, False, str(exc))
 
-            self._last = result
-            self._current_cue_id = result.cue_id if result.connected else None
-            payload = {
-                **self.status(),
-                "timestamp": time.time(),
-            }
-            self.emit("countdown_tick", payload)
+            media_ok = result.connected and result.seconds is not None
+            was_coasting = self._coasting
 
-            if not result.connected:
-                # Keep session state across brief link drops; avoid false crossings on resume
-                prev_seconds = None
-                self._current_cue_id = None
-            elif result.seconds is None:
-                if self._had_media:
-                    self._fired.clear()
-                    self._had_media = False
-                    prev_seconds = None
-                    self._current_cue_id = None
-                    self.emit("countdown_reset", {"reason": "no_media"})
-            else:
+            if media_ok:
+                assert result.seconds is not None
+                extrapolated = self._extrapolated_remaining(now)
+                same_cue = (result.cue_id == self._last_good_cue_id) or (
+                    result.cue_id is None and self._last_good_cue_id is None
+                )
+                close_resync = (
+                    was_coasting
+                    and extrapolated is not None
+                    and same_cue
+                    and abs(result.seconds - extrapolated) <= MEDIA_RESYNC_TOLERANCE_SECONDS
+                )
+
+                self._media_missing_since = None
+                self._coasting = False
+                self._last_good_seconds = result.seconds
+                self._last_good_at = now
+                self._last_good_label = result.label
+                self._last_good_cue_id = result.cue_id
+                self._current_cue_id = result.cue_id
+                self._last = result
+
                 if not self._had_media:
-                    # Fresh media — do not speak catch-up for thresholds already passed
                     self._had_media = True
-                    self._fired.clear()
-                    for threshold, row_id in threshold_rows(
-                        self._profile.schedule if self._profile else []
-                    ):
-                        if result.seconds < threshold - THRESHOLD_WINDOW_SECONDS:
-                            self._fired.add(f"row:{row_id}")
-                    continuous = continuous_sequence_fire(
-                        self._profile.schedule if self._profile else []
-                    )
-                    if continuous:
-                        start, _clips, row_id = continuous
-                        if result.seconds < start - THRESHOLD_WINDOW_SECONDS:
-                            self._fired.add(f"row:{row_id}")
-                    for seq_sec, clip_id in sequence_thresholds(
-                        self._profile.schedule if self._profile else []
-                    ):
-                        if result.seconds < seq_sec - THRESHOLD_WINDOW_SECONDS:
-                            self._fired.add(f"seq:{clip_id}")
+                    self._mark_thresholds_already_passed(result.seconds)
+                elif was_coasting and not close_resync:
+                    # New cue or clock jumped — treat as fresh media
+                    self._mark_thresholds_already_passed(result.seconds)
                 else:
                     self._handle_remaining(result.seconds, prev_seconds)
                 prev_seconds = result.seconds
+            elif self._had_media:
+                if self._media_missing_since is None:
+                    self._media_missing_since = now
+                missing_for = now - self._media_missing_since
+                extrapolated = self._extrapolated_remaining(now)
 
+                if extrapolated is not None and extrapolated <= 0:
+                    self._last = RemainingTime(
+                        0.0,
+                        self._last_good_label,
+                        False,
+                        "Countdown finished during hold",
+                        cue_id=self._last_good_cue_id,
+                    )
+                    self.emit(
+                        "countdown_tick",
+                        {**self.status(), "timestamp": now},
+                    )
+                    self._reset_media_session("finished_during_hold")
+                    prev_seconds = None
+                    time.sleep(POLL_INTERVAL_SECONDS)
+                    continue
+
+                if missing_for <= MEDIA_HOLDOVER_SECONDS and extrapolated is not None:
+                    self._coasting = True
+                    self._current_cue_id = self._last_good_cue_id
+                    self._last = RemainingTime(
+                        extrapolated,
+                        self._last_good_label,
+                        False,
+                        "Holding countdown — waiting for source",
+                        cue_id=self._last_good_cue_id,
+                    )
+                    self._handle_remaining(extrapolated, prev_seconds)
+                    prev_seconds = extrapolated
+                else:
+                    self._last = RemainingTime(
+                        None,
+                        None,
+                        result.connected,
+                        result.message or "No media",
+                    )
+                    self.emit(
+                        "countdown_tick",
+                        {**self.status(), "timestamp": now},
+                    )
+                    self._reset_media_session("no_media")
+                    prev_seconds = None
+                    time.sleep(POLL_INTERVAL_SECONDS)
+                    continue
+            else:
+                self._coasting = False
+                self._media_missing_since = None
+                self._current_cue_id = result.cue_id if result.connected else None
+                self._last = result
+                prev_seconds = None
+
+            self.emit(
+                "countdown_tick",
+                {**self.status(), "timestamp": now},
+            )
             time.sleep(POLL_INTERVAL_SECONDS)

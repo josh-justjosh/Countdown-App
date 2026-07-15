@@ -39,5 +39,7 @@ On the control page, press **⌘P** (Mac) or **Ctrl+P** (Windows) for Greenwich-
 
 - **Cannot Arm:** a required clip for an enabled schedule row is missing on the active (or per-row) voice — open Manage voice / Record missing.
 - **No sound:** confirm output device; try Play on a clip in the library.
-- **QLab not connecting:** check IP, OSC ports (53000/53001), and QLab OSC access / passcode.
+- **QLab not connecting:** check IP, OSC ports (send 53000 / listen 53001), and QLab Workspace Settings → Network → OSC Access (View / passcode).
+- **Windows: “No OSC reply” but ping works:** ping uses ICMP; QLab uses UDP. Windows Defender Firewall often blocks UDP replies. Allow **VT Vocal Countdown** for Private networks (first prompt, or Firewall → Allow an app), or add an inbound UDP rule for the listen port (default **53001**) and outbound UDP **53000** to the Mac running QLab.
+- **Brief “Holding” / flaky QLab:** intermittent OSC drops coast from the last remaining time for ~10 seconds and keep firing announcements; a full “Countdown reset” only happens if media does not return after that window.
 - **macOS “app is damaged / can’t be opened”:** usually Gatekeeper on an unsigned download — right-click → Open.

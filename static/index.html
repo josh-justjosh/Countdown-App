@@ -38,7 +38,10 @@
           <span :class="['status-pill', linkPillClass]">{{ linkLabel }}</span>
           <div style="margin-top:0.5rem">{{ status.label || '—' }} · {{ status.message || '' }}</div>
         </div>
-        <p v-if="status.armed && !status.connected" class="live-meta" style="color:var(--danger)">
+        <p v-if="status.armed && status.coasting" class="live-meta" style="color:var(--warn)">
+          Holding last countdown — re-syncing…
+        </p>
+        <p v-else-if="status.armed && !status.connected" class="live-meta" style="color:var(--danger)">
           Lost connection to source — still armed; will resume when the link returns.
         </p>
         <p v-else-if="status.armed && status.connected && status.remaining_seconds == null" class="live-meta" style="color:var(--warn)">
@@ -508,6 +511,7 @@
           remaining_seconds: null,
           label: null,
           connected: false,
+          coasting: false,
           message: "",
           playing: false,
         });
@@ -561,11 +565,13 @@
         });
 
         const linkLabel = computed(() => {
+          if (status.coasting) return "Holding";
           if (status.connected) return "Connected";
           if (status.armed) return "No link";
           return "Idle";
         });
         const linkPillClass = computed(() => {
+          if (status.coasting) return "warn";
           if (status.connected) return "ok";
           if (status.armed) return "bad";
           return "";

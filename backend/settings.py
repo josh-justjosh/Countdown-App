@@ -44,6 +44,12 @@ PORT = 5050
 
 POLL_INTERVAL_SECONDS = 0.25
 THRESHOLD_WINDOW_SECONDS = 0.75
+# After media disappears from a poll (flaky OSC / brief disconnect), coast from the
+# last good remaining time for this long before treating the VT as finished.
+MEDIA_HOLDOVER_SECONDS = 10.0
+# On resume from coast, keep fired thresholds if live remaining is within this of
+# the extrapolated value and the cue id matches.
+MEDIA_RESYNC_TOLERANCE_SECONDS = 2.0
 
 DEFAULT_VMIX_PORT = 8088
 DEFAULT_QLAB_SEND_PORT = 53000

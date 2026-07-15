@@ -18,14 +18,17 @@
       <div class="label">{{ status.label || 'No media' }}</div>
       <div class="badge">
         <span :class="['status-pill', status.armed ? 'ok' : '']">{{ status.armed ? 'ARMED' : 'STANDBY' }}</span>
-        <span :class="['status-pill', status.connected ? 'ok' : 'bad']">{{ status.connected ? 'LIVE' : 'NO LINK' }}</span>
+        <span :class="['status-pill', linkPillClass]">{{ linkLabel }}</span>
+      </div>
+      <div v-if="status.coasting" class="label" style="font-size:0.95rem;margin-top:0.5rem;color:var(--warn)">
+        Holding last countdown — re-syncing…
       </div>
       <div class="label" style="font-size:0.95rem;margin-top:1rem">{{ status.message }}</div>
     </div>
   </div>
   <script type="module">
     import { formatTime } from "/assets/js/api.js";
-    const { createApp, reactive, onMounted } = Vue;
+    const { createApp, reactive, computed, onMounted } = Vue;
     createApp({
       setup() {
         const status = reactive({
@@ -33,7 +36,18 @@
           remaining_seconds: null,
           label: null,
           connected: false,
+          coasting: false,
           message: "",
+        });
+        const linkLabel = computed(() => {
+          if (status.coasting) return "HOLDING";
+          if (status.connected) return "LIVE";
+          return "NO LINK";
+        });
+        const linkPillClass = computed(() => {
+          if (status.coasting) return "warn";
+          if (status.connected) return "ok";
+          return "bad";
         });
         onMounted(() => {
           const socket = io();
@@ -41,7 +55,7 @@
           socket.on("engine_status", (data) => Object.assign(status, data));
           fetch("/api/status").then((r) => r.json()).then((d) => Object.assign(status, d));
         });
-        return { status, formatTime };
+        return { status, formatTime, linkLabel, linkPillClass };
       },
     }).mount("#app");
   </script>
